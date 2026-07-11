@@ -52,6 +52,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val routeSettings: StateFlow<String> = simulator.routeSettings
     val enableHexTun: StateFlow<Boolean> = simulator.enableHexTun
     val testUrl: StateFlow<String> = simulator.testUrl
+    val socksTunnelEngine: StateFlow<String> = simulator.socksTunnelEngine
 
     init {
         // Seed default configurations if database is empty
@@ -308,5 +309,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun setTestUrl(url: String) {
         simulator.testUrl.value = url
         simulator.log("Test URL updated to: $url")
+    }
+
+    fun setSocksTunnelEngine(engine: String) {
+        simulator.socksTunnelEngine.value = engine
+        simulator.log("SOCKS Tunnel Engine changed to: $engine")
     }
 }

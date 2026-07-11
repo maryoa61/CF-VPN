@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "VPN Client"
+rootProject.name = "CFVPN"
 
 include(":app")

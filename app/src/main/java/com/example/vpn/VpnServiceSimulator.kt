@@ -50,6 +50,7 @@ class VpnServiceSimulator private constructor(private val context: Context) {
     val routeSettings = MutableStateFlow("custom route settings")
     val enableHexTun = MutableStateFlow(true)
     val testUrl = MutableStateFlow("https://www.google.com")
+    val socksTunnelEngine = MutableStateFlow("HevSocks5Tunnel (C-based)")
 
     companion object {
         @Volatile
@@ -113,8 +114,8 @@ class VpnServiceSimulator private constructor(private val context: Context) {
             log("Loading socks5 listener on ${listenAddress.value}:${socksPort.value}")
             delay(500)
 
-            log("Applying HevSocks5Tunnel interface configuration...")
-            log("Bypassing system proxy, routing table updated.")
+            log("Applying ${socksTunnelEngine.value} interface configuration (tun2socks mode)...")
+            log("Bypassing system proxy, routing table updated via tun2socks interface.")
             delay(600)
 
             log("Testing connection handshake to ${config.address}:${config.port}...")

@@ -1569,6 +1569,8 @@ fun SettingsScreen(
     val routeSettings by viewModel.routeSettings.collectAsStateWithLifecycle()
     val enableHexTun by viewModel.enableHexTun.collectAsStateWithLifecycle()
     val testUrl by viewModel.testUrl.collectAsStateWithLifecycle()
+    val socksTunnelEngine by viewModel.socksTunnelEngine.collectAsStateWithLifecycle()
+    var showTunnelEngineDialog by remember { mutableStateOf(false) }
 
     var showPortDialog by remember { mutableStateOf(false) }
     var inputPort by remember { mutableStateOf("") }
@@ -2253,6 +2255,29 @@ fun SettingsScreen(
                                 }
                             }
                         }
+
+                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+
+                        // Socks Tunnel Engine Item
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showTunnelEngineDialog = true
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text("Socks Tunnel Engine", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Text(socksTunnelEngine, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2479,6 +2504,55 @@ fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { showTestUrlDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTunnelEngineDialog) {
+        val engines = listOf(
+            "HevSocks5Tunnel (C-based)",
+            "tun2socks (Standard Go-based)",
+            "Go-tun2socks (optimized)"
+        )
+        AlertDialog(
+            onDismissRequest = { showTunnelEngineDialog = false },
+            title = { Text("Select Socks Tunnel Engine") },
+            text = {
+                Column {
+                    Text(
+                        "Socks Tunnel Engine is used to route device TCP/UDP traffic through the local SOCKS5 proxy created by the core daemon.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    engines.forEach { engine ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    viewModel.setSocksTunnelEngine(engine)
+                                    showTunnelEngineDialog = false
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (engine == socksTunnelEngine),
+                                onClick = {
+                                    viewModel.setSocksTunnelEngine(engine)
+                                    showTunnelEngineDialog = false
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(engine, fontSize = 14.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTunnelEngineDialog = false }) {
+                    Text("Close")
                 }
             }
         )
