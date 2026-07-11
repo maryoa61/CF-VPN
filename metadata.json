@@ -1,0 +1,6 @@
+{
+  "name": "VPN Client",
+  "description": "An advanced Android VPN client supporting Vless, Vmess, Shadowsocks, Trojan, and Hysteria2.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
