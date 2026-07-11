@@ -25,15 +25,13 @@ jobs:
         java-version: '21'
         cache: 'gradle'
 
-    - name: Decode Debug Keystore from Secrets
-      env:
-        DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+    - name: Decode Debug Keystore
       run: |
-        if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-          echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
+        if [ -f "debug.keystore.base64" ]; then
+          echo "Decoding debug keystore..."
+          base64 -d debug.keystore.base64 > debug.keystore
         else
-          echo "Error: DEBUG_KEYSTORE_BASE64 secret is missing."
-          exit 1
+          echo "No debug.keystore.base64 found, skipping decode."
         fi
 
     - name: Grant Execute Permission to Gradlew
