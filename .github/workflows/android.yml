@@ -37,6 +37,11 @@ jobs:
     - name: Grant Execute Permission to Gradlew
       run: chmod +x gradlew
 
+    - name: Download Clean Gradle Wrapper JAR
+      run: |
+        mkdir -p gradle/wrapper
+        curl -sL https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+
     - name: Run Unit & Robolectric Tests
       run: ./gradlew testDebugUnitTest --stacktrace
 
