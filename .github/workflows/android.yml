@@ -25,6 +25,9 @@ jobs:
         java-version: '21'
         cache: 'gradle'
 
+    - name: Write Debug Keystore Base64
+      run: echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" > debug.keystore.base64
+
     - name: Decode Debug Keystore
       run: |
         if [ -f "debug.keystore.base64" ]; then
