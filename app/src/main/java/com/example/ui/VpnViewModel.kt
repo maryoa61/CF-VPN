@@ -7,7 +7,7 @@ import com.example.data.VpnConfig
 import com.example.data.VpnDatabase
 import com.example.data.VpnRepository
 import com.example.util.VpnParser
-import com.example.vpn.VpnServiceSimulator
+import com.example.vpn.VpnConnectionManager
 import com.example.vpn.VpnStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
@@ -22,7 +22,10 @@ import kotlin.system.measureTimeMillis
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val database = VpnDatabase.getDatabase(application)
     private val repository = VpnRepository(database.vpnConfigDao())
-    val simulator = VpnServiceSimulator.getInstance(application)
+    val connectionManager = VpnConnectionManager.getInstance(application)
+
+    @Deprecated("Renamed to connectionManager for real production service", ReplaceWith("connectionManager"))
+    val simulator = connectionManager
 
     // Data configurations flow
     val allConfigs: StateFlow<List<VpnConfig>> = repository.allConfigs
