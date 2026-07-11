@@ -1,4 +1,5 @@
 package com.example
+// Sync trigger comment for GitHub
 
 import android.content.ClipboardManager
 import android.content.Context
