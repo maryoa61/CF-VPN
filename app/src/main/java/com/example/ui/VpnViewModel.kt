@@ -109,7 +109,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             type = "trojan",
                             address = "fi.vpn-core.net",
                             port = 443,
-                            rawLink = "trojan://pass@fi.vpn-core.net:443?security=tls#Trojan-TLS-HighSpeed"
+                            rawLink = "trojan://pass@fi.vpn-core.net:443?security=tls#Trojan-TLS-HighSpeed",
+                            password = "pass",
+                            security = "tls"
                         )
                     )
                     for (node in defaultNodes) {
@@ -150,7 +152,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             // Mocking profile list returned from subscription link
             val mockConfigs = listOf(
                 VpnConfig(name = "Premium-Vless-Germany", type = "vless", address = "de.vpn-premium.com", port = 443, rawLink = "vless://de-node@de.vpn-premium.com:443?security=tls#Premium-Vless-Germany"),
-                VpnConfig(name = "Fast-Trojan-Singapore", type = "trojan", address = "sg.vpn-premium.com", port = 8080, rawLink = "trojan://password-sg@sg.vpn-premium.com:8080?security=tls#Fast-Trojan-Singapore"),
+                VpnConfig(name = "Fast-Trojan-Singapore", type = "trojan", address = "sg.vpn-premium.com", port = 8080, rawLink = "trojan://password-sg@sg.vpn-premium.com:8080?security=tls#Fast-Trojan-Singapore", password = "password-sg", security = "tls"),
                 VpnConfig(name = "LowPing-Hysteria2-Finland", type = "hysteria2", address = "fi.vpn-premium.com", port = 21000, rawLink = "hysteria2://auth-fi@fi.vpn-premium.com:21000?insecure=1#LowPing-Hysteria2-Finland"),
                 VpnConfig(name = "Standard-Shadowsocks-US", type = "shadowsocks", address = "us.vpn-premium.com", port = 1080, rawLink = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.vpn-premium.com:1080#Standard-Shadowsocks-US"),
                 VpnConfig(name = "UltraSpeed-Vmess-Japan", type = "vmess", address = "jp.vpn-premium.com", port = 443, rawLink = "vmess://eyJhZGQiOiJqcC52cG4tcHJlbWl1bS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkLWpwIiwicHMiOiJVbHRyYVNwZWVkLVZtZXNzLUphcGFuIn0=")
