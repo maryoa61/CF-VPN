@@ -338,11 +338,11 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
 
     // --- libv2ray.CoreCallbackHandler ---
 
-    override fun startup(): Int = 0
+    override fun startup(): Long = 0
 
-    override fun shutdown(): Int = 0
+    override fun shutdown(): Long = 0
 
-    override fun onEmitStatus(code: Int, message: String): Int {
+    override fun onEmitStatus(code: Long, message: String): Long {
         VpnConnectionManager.getInstance(this).log("Xray-core [$code]: $message")
         return 0
     }
