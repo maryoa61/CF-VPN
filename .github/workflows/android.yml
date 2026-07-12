@@ -25,6 +25,16 @@ jobs:
         java-version: '21'
         cache: 'gradle'
 
+    - name: Fetch native VPN engine sources
+      run: |
+        mkdir -p app/libs
+        # Xray-core prebuilt AAR (Trojan/VLESS/VMess client engine)
+        curl -sL -o app/libs/libv2ray.aar \
+          https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar
+        # tun2socks engine source (compiled by Gradle's externalNativeBuild/ndkBuild)
+        git clone --recursive https://github.com/heiher/hev-socks5-tunnel \
+          app/src/main/jni/hev-socks5-tunnel
+
     - name: Write Debug Keystore Base64
       run: echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" > debug.keystore.base64
 
