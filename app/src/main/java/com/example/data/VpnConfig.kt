@@ -13,7 +13,7 @@ data class VpnConfig(
     val rawLink: String,
     val isSelected: Boolean = false,
     val delayMs: Int? = null,
-    
+
     // VLESS-specific settings
     val uuid: String? = null,
     val network: String? = "tcp", // "tcp", "ws", "grpc", etc.
@@ -22,7 +22,10 @@ data class VpnConfig(
     val sni: String? = null,
     val publicKey: String? = null,
     val shortId: String? = null,
-    
+
+    // Trojan-specific settings
+    val password: String? = null,
+
     // Fragment settings
     val fragmentEnabled: Boolean = false,
     val fragmentLength: String? = "10-20",
