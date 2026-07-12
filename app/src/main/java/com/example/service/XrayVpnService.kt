@@ -1,8 +1,12 @@
 package com.example.service
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.core.app.NotificationCompat
 import com.example.data.VpnConfig
 import com.example.vpn.Hev2Socks
 import com.example.vpn.VpnConnectionManager
@@ -29,6 +33,8 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
 
     companion object {
         const val EXTRA_CONFIG_JSON = "vpn_config_json"
+        private const val NOTIFICATION_CHANNEL_ID = "vpn_status_channel"
+        private const val NOTIFICATION_ID = 1
         private const val SOCKS_PORT = 10808
         private const val TUN_ADDRESS_V4 = "10.8.0.2"
         private const val TUN_ADDRESS_V6 = "fd00::2"
@@ -133,6 +139,7 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
                 return
             }
             vpnInterface = pfd
+            startForegroundNotification()
 
             manager.log("Virtual TUN device created successfully: session=CFVPN_Secure_Tunnel, interface=tun0, MTU=$TUN_MTU")
             manager.log("Local interface bound: $TUN_ADDRESS_V4/32 & $TUN_ADDRESS_V6/128")
@@ -176,11 +183,10 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
 
     /** Builds the Xray-core JSON config: SOCKS inbound (for hev2socks) + Trojan outbound. */
     private fun buildXrayConfig(config: VpnConfig): String {
-        val security = if (config.security.isNullOrEmpty() || config.security == "none") {
-            "tls" // Trojan servers expect TLS in the overwhelming majority of setups
-        } else {
-            config.security
-        }
+        // Respect the security mode actually declared by the config/link. Many Trojan
+        // deployments behind a CDN (e.g. Cloudflare Workers, security=none&type=ws) rely on
+        // the CDN edge for TLS termination, so forcing "tls" here breaks the handshake.
+        val security = config.security?.takeIf { it.isNotEmpty() } ?: "none"
 
         val inbound = JSONObject().apply {
             put("tag", "socks-in")
@@ -198,13 +204,24 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
             })
         }
 
+        val network = config.network ?: "tcp"
         val streamSettings = JSONObject().apply {
-            put("network", config.network ?: "tcp")
+            put("network", network)
             put("security", security)
             if (security == "tls") {
                 put("tlsSettings", JSONObject().apply {
                     put("serverName", config.sni ?: config.address)
                     put("allowInsecure", false)
+                })
+            }
+            if (network == "ws") {
+                put("wsSettings", JSONObject().apply {
+                    put("path", config.wsPath ?: "/")
+                    if (!config.wsHost.isNullOrEmpty()) {
+                        put("headers", JSONObject().apply {
+                            put("Host", config.wsHost)
+                        })
+                    }
                 })
             }
         }
@@ -258,6 +275,31 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
               address: 127.0.0.1
               udp: 'udp'
         """.trimIndent()
+    }
+
+    private fun startForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "VPN Status",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("VPN Connected")
+            .setContentText("Tunnel is active")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun stopVpn() {
