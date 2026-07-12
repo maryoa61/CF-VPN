@@ -53,6 +53,8 @@ import com.example.service.XrayVpnService
 import com.example.ui.VpnViewModel
 import com.example.ui.theme.MyApplicationTheme
 import com.example.vpn.VpnStatus
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
 class MainActivity : ComponentActivity() {
 
@@ -109,7 +111,19 @@ class MainActivity : ComponentActivity() {
 
     private fun startVpnServiceInternal() {
         try {
-            val intent = Intent(this, XrayVpnService::class.java)
+            val config = viewModel.selectedConfigFlow.value
+            if (config == null) {
+                viewModel.simulator.log("Error: No configuration selected to start the VPN")
+                Toast.makeText(this, "Please select a config first", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+            val configJson = moshi.adapter(VpnConfig::class.java).toJson(config)
+
+            val intent = Intent(this, XrayVpnService::class.java).apply {
+                putExtra(XrayVpnService.EXTRA_CONFIG_JSON, configJson)
+            }
             startService(intent)
             viewModel.toggleConnection()
         } catch (e: Exception) {
