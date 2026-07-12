@@ -23,6 +23,10 @@ data class VpnConfig(
     val publicKey: String? = null,
     val shortId: String? = null,
 
+    // WebSocket transport settings (used when network == "ws")
+    val wsPath: String? = null,
+    val wsHost: String? = null,
+
     // Trojan-specific settings
     val password: String? = null,
 
