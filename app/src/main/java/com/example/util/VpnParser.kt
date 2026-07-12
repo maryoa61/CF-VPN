@@ -92,15 +92,28 @@ object VpnParser {
         var host = uri.host
         var port = uri.port
 
+        // userInfo holds the UUID (vless) or password (trojan). android.net.Uri auto-decodes
+        // %XX escapes here (e.g. %5B -> [), so this is already the raw secret.
+        var userInfo = uri.userInfo
+
         if (host == null || port == -1) {
             // Manual parsing
             val withoutScheme = link.substring(scheme.length + 3) // remove "vless://"
             val hashIndex = withoutScheme.indexOf("#")
             val mainPart = if (hashIndex != -1) withoutScheme.substring(0, hashIndex) else withoutScheme
-            
+
             val atIndex = mainPart.lastIndexOf("@")
             val connPart = if (atIndex != -1) mainPart.substring(atIndex + 1) else mainPart
-            
+
+            if (atIndex != -1) {
+                val rawUserInfo = mainPart.substring(0, atIndex)
+                userInfo = try {
+                    URLDecoder.decode(rawUserInfo, "UTF-8")
+                } catch (e: Exception) {
+                    rawUserInfo
+                }
+            }
+
             // connPart is "host:port?query"
             val queryIndex = connPart.indexOf("?")
             val hostPortPart = if (queryIndex != -1) connPart.substring(0, queryIndex) else connPart
@@ -124,14 +137,22 @@ object VpnParser {
         } ?: "${type}_node_${host.take(5)}"
 
         // Extract query parameters for VLESS, if applicable
-        val uuid = if (type == "vless") uri.userInfo else null
+        val uuid = if (type == "vless") userInfo else null
+        val password = if (type == "trojan") userInfo else null
         val security = uri.getQueryParameter("security") ?: "none"
         val flow = uri.getQueryParameter("flow") ?: "none"
         val sni = uri.getQueryParameter("sni")
         val publicKey = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey")
         val shortId = uri.getQueryParameter("sid") ?: uri.getQueryParameter("shortId")
         val network = uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp"
-        
+
+        // WebSocket transport settings (used when network == "ws"). Uri.getQueryParameter
+        // already URL-decodes once, which is correct here: e.g. "path" commonly carries an
+        // embedded query string itself (like "...?ed=2560" for WS early-data), and decoding
+        // it twice would corrupt it.
+        val wsPath = uri.getQueryParameter("path")
+        val wsHost = uri.getQueryParameter("host")
+
         // Extract Fragment parameters if specified in link
         val fragmentEnabled = uri.getQueryParameter("fragment") == "1" || uri.getQueryParameter("fragmentEnabled") == "true"
         val fragmentLength = uri.getQueryParameter("fragmentLength") ?: "10-20"
@@ -145,12 +166,15 @@ object VpnParser {
             port = port,
             rawLink = link,
             uuid = uuid,
+            password = password,
             network = network,
             security = security,
             flow = flow,
             sni = sni,
             publicKey = publicKey,
             shortId = shortId,
+            wsPath = wsPath,
+            wsHost = wsHost,
             fragmentEnabled = fragmentEnabled,
             fragmentLength = fragmentLength,
             fragmentInterval = fragmentInterval,
