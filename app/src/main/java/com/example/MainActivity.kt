@@ -73,6 +73,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
+            try {
+                val logFile = java.io.File(getExternalFilesDir(null), "crash_log.txt")
+                logFile.appendText("=== CRASH at ${java.util.Date()} ===\n")
+                logFile.appendText(android.util.Log.getStackTraceString(throwable))
+                logFile.appendText("\n\n")
+            } catch (e: Exception) { }
+            android.os.Process.killProcess(android.os.Process.myPid())
+            kotlin.system.exitProcess(1)
+        }
         enableEdgeToEdge()
 
         setContent {
