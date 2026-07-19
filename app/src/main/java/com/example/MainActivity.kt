@@ -75,10 +75,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             try {
-                val logFile = java.io.File(getExternalFilesDir(null), "crash_log.txt")
-                logFile.appendText("=== CRASH at ${java.util.Date()} ===\n")
-                logFile.appendText(android.util.Log.getStackTraceString(throwable))
-                logFile.appendText("\n\n")
+                val text = "=== CRASH at ${java.util.Date()} ===\n" +
+                    android.util.Log.getStackTraceString(throwable) + "\n\n"
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "crash_log.txt")
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/")
+                }
+                val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                uri?.let { u ->
+                    contentResolver.openOutputStream(u)?.use { stream -> stream.write(text.toByteArray()) }
+                }
             } catch (e: Exception) { }
             android.os.Process.killProcess(android.os.Process.myPid())
             kotlin.system.exitProcess(1)
