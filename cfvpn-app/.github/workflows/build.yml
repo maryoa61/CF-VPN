@@ -1,0 +1,98 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}   # اجازه‌ی اجرای دستی از تب Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # این ران‌رِ گیت‌هاب برخلاف sandbox، به dl.google.com دسترسی کامل دارد،
+      # پس Android SDK + NDK بدون مشکل نصب می‌شوند.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        env:
+          NDK_VERSION: "26.2.11394342"
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # هسته‌ی xray را باید خودتان به‌عنوان یک artifact/secret یا مستقیم در ریپو
+      # (در مسیر app/src/main/assets/xray) قرار دهید؛ اینجا صرفاً بررسی می‌کنیم که
+      # فراموش نشده باشد تا build بی‌دلیل با خطای runtime مواجه نشود.
+      - name: Sanity-check xray binary is present
+        run: |
+          if [ ! -f app/src/main/assets/xray ]; then
+            echo "::warning::app/src/main/assets/xray پیدا نشد؛ اپ در زمان اجرا کرش می‌کند تا وقتی این فایل را اضافه کنید."
+          fi
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfvpn-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # Job اختیاری برای ساخت نسخه‌ی release امضاشده.
+  # فعال‌سازی: چهار secret زیر را در Settings > Secrets and variables > Actions
+  # این ریپازیتوری تعریف کنید، سپس این job را از حالت کامنت خارج کنید:
+  #   SIGNING_KEYSTORE_BASE64  (خروجی base64 فایل .jks شما)
+  #   SIGNING_KEYSTORE_PASSWORD
+  #   SIGNING_KEY_ALIAS
+  #   SIGNING_KEY_PASSWORD
+  # -------------------------------------------------------------------------
+  # build-release:
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-java@v4
+  #       with:
+  #         distribution: temurin
+  #         java-version: "17"
+  #     - uses: android-actions/setup-android@v3
+  #     - run: sdkmanager --install "ndk;26.2.11394342"
+  #     - run: chmod +x gradlew
+  #     - name: Decode keystore
+  #       run: echo "${{ secrets.SIGNING_KEYSTORE_BASE64 }}" | base64 -d > app/release.jks
+  #     - name: Build signed release APK
+  #       env:
+  #         SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+  #         SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+  #         SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+  #       run: ./gradlew assembleRelease --stacktrace
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: cfvpn-release-apk
+  #         path: app/build/outputs/apk/release/*.apk

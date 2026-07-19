@@ -1,0 +1,18 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Local machine-specific files
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Signing (هرگز کیستور یا رمزها را کامیت نکنید)
+*.jks
+*.keystore
+keystore.properties
+
+# NDK build artifacts که externalNativeBuild خودش می‌سازد
+app/.cxx/
