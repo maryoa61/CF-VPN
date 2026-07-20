@@ -63,12 +63,26 @@ object VpnParser {
             val portStr = json.optString("port", "443")
             val port = portStr.toIntOrNull() ?: 443
             val name = json.optString("ps", "vmess-node")
+            val uuid = json.optString("id", "").takeIf { it.isNotEmpty() }
+            val network = json.optString("net", "tcp").takeIf { it.isNotEmpty() } ?: "tcp"
+            val tls = json.optString("tls", "")
+            val security = if (tls == "tls" || tls == "reality") tls else "none"
+            val sni = json.optString("sni", "").takeIf { it.isNotEmpty() }
+                ?: json.optString("host", "").takeIf { it.isNotEmpty() }
+            val wsPath = json.optString("path", "").takeIf { it.isNotEmpty() }
+            val wsHost = json.optString("host", "").takeIf { it.isNotEmpty() }
             VpnConfig(
                 name = name,
                 type = "vmess",
                 address = address,
                 port = port,
-                rawLink = link
+                rawLink = link,
+                uuid = uuid,
+                network = network,
+                security = security,
+                sni = sni,
+                wsPath = wsPath,
+                wsHost = wsHost
             )
         } catch (e: Exception) {
             null
@@ -138,7 +152,22 @@ object VpnParser {
 
         // Extract query parameters for VLESS, if applicable
         val uuid = if (type == "vless") userInfo else null
-        val password = if (type == "trojan") userInfo else null
+        // ss:// userInfo is either plain "method:password" or base64("method:password").
+        val ssDecoded = if (type == "shadowsocks") {
+            val raw = userInfo ?: ""
+            if (raw.contains(":")) raw else try {
+                String(Base64.decode(raw, Base64.DEFAULT), StandardCharsets.UTF_8)
+            } catch (e: Exception) {
+                raw
+            }
+        } else null
+        val ssMethod = ssDecoded?.substringBefore(":", missingDelimiterValue = "")?.takeIf { it.isNotEmpty() }
+        val ssPassword = ssDecoded?.substringAfter(":", missingDelimiterValue = "")?.takeIf { it.isNotEmpty() }
+        val password = when (type) {
+            "trojan" -> userInfo
+            "shadowsocks" -> ssPassword
+            else -> null
+        }
         val security = uri.getQueryParameter("security") ?: "none"
         val flow = uri.getQueryParameter("flow") ?: "none"
         val sni = uri.getQueryParameter("sni")
@@ -167,6 +196,7 @@ object VpnParser {
             rawLink = link,
             uuid = uuid,
             password = password,
+            ssMethod = ssMethod,
             network = network,
             security = security,
             flow = flow,
