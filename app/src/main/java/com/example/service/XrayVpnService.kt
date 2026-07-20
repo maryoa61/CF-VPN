@@ -9,10 +9,16 @@ import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.data.VpnConfig
 import com.example.vpn.Hev2Socks
+import com.example.vpn.IpPoolManager
 import com.example.vpn.VpnConnectionManager
 import com.example.vpn.VpnStatus
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
@@ -38,12 +44,21 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
         private const val SOCKS_PORT = 10808
         private const val TUN_ADDRESS_V4 = "10.8.0.2"
         private const val TUN_ADDRESS_V6 = "fd00::2"
-        private const val TUN_MTU = 1500
+        // Bumped from 1500: hev2socks re-segments into normal-sized TCP packets on
+        // its own real sockets anyway, so a larger virtual-interface MTU only cuts
+        // per-packet syscall/JNI overhead between apps -> tun0 -> hev2socks; it does
+        // not require the underlying mobile network to support jumbo frames.
+        private const val TUN_MTU = 8500
+        private const val IP_POOL_SCAN_PORT_FALLBACK = 443
+        private const val IP_POOL_KEEP_TOP = 4
+        private const val IP_POOL_SCAN_TIMEOUT_MS = 1500
+        private const val IP_POOL_RESCAN_INTERVAL_MS = 60_000L
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var coreController: CoreController? = null
     private var coreEnvInitialized = false
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val moshi by lazy { Moshi.Builder().add(KotlinJsonAdapterFactory()).build() }
 
@@ -152,7 +167,53 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
                 coreEnvInitialized = true
             }
 
-            val xrayConfigJson = buildXrayConfig(config)
+            // IP-Pool: only meaningful for TLS-fronted configs (trojan here) where the
+            // cert/SNI stays fixed regardless of which edge IP we actually dial. This
+            // MUST run after establish()+addDisallowedApplication above, so the probe
+            // sockets bypass the tunnel instead of looping back into it.
+            val poolCandidates = config.ipPool?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?: IpPoolManager.DEFAULT_POOL
+            val resolvedPool: List<String> = if (config.security == "tls" && poolCandidates.isNotEmpty()) {
+                val ranked = runBlocking {
+                    IpPoolManager.scanAndRank(
+                        candidates = poolCandidates,
+                        port = config.port,
+                        keepTop = IP_POOL_KEEP_TOP,
+                        timeoutMs = IP_POOL_SCAN_TIMEOUT_MS
+                    )
+                }
+                if (ranked.isEmpty()) {
+                    manager.log("IP-Pool: no candidate edge IP answered within ${IP_POOL_SCAN_TIMEOUT_MS}ms, falling back to ${config.address}")
+                    emptyList()
+                } else {
+                    manager.log("IP-Pool: ${ranked.size} clean edge IP(s) ready for rotation: ${ranked.joinToString()}")
+                    IpPoolManager.start(
+                        scope = serviceScope,
+                        candidates = poolCandidates,
+                        port = config.port,
+                        intervalMs = IP_POOL_RESCAN_INTERVAL_MS,
+                        timeoutMs = IP_POOL_SCAN_TIMEOUT_MS,
+                        keepTop = IP_POOL_KEEP_TOP
+                    ) { updated -> manager.log("IP-Pool: background rescan refreshed pool: ${updated.joinToString()}") }
+                    ranked
+                }
+            } else {
+                emptyList()
+            }
+
+            if (config.type == "hysteria2") {
+                // Honest limitation: this build's proxy core is Xray-core, which does not
+                // speak the Hysteria2/QUIC wire protocol. Routing a hysteria2:// profile
+                // through it would silently fail to connect. A real Hysteria2 outbound
+                // needs the separate hysteria2 (or sing-box) native core linked in — not
+                // done yet in this project. Surface that clearly instead of pretending.
+                manager.log("Fatal: type=hysteria2 needs the Hysteria2/QUIC core, which isn't linked into this build yet (Xray-core only). Use a trojan/vless profile for now.")
+                manager.setStatus(VpnStatus.DISCONNECTED)
+                stopVpn()
+                return
+            }
+
+            val xrayConfigJson = buildXrayConfig(config, resolvedPool)
             val controller = Libv2ray.newCoreController(this)
             coreController = controller
             // tunFd = 0: tell Xray-core not to manage the TUN device itself.
