@@ -1,17 +1,14 @@
-name: Android CI
+name: CFVPN Manual CI
 
 on:
-  push:
-    branches: [ "main", "master", "develop" ]
-  pull_request:
-    branches: [ "main", "master", "develop" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-and-test:
-    name: Build & Test CFVPN
+  manual-ci:
+    name: Manual Build / Test / Analyze
     runs-on: ubuntu-latest
 
     steps:
@@ -28,51 +25,28 @@ jobs:
     - name: Fetch native VPN engine sources
       run: |
         mkdir -p app/libs
-        # Xray-core prebuilt AAR (Trojan/VLESS/VMess client engine)
         curl -sL -o app/libs/libv2ray.aar \
           https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar
-        # tun2socks engine source (compiled by Gradle's externalNativeBuild/ndkBuild)
         git clone --recursive https://github.com/heiher/hev-socks5-tunnel \
           app/src/main/jni/hev-socks5-tunnel
-
-    - name: Write Debug Keystore Base64
-      run: echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" > debug.keystore.base64
-
-    - name: Decode Debug Keystore
-      run: |
-        if [ -f "debug.keystore.base64" ]; then
-          echo "Decoding debug keystore..."
-          base64 -d debug.keystore.base64 > debug.keystore
-        else
-          echo "No debug.keystore.base64 found, skipping decode."
-        fi
 
     - name: Grant Execute Permission to Gradlew
       run: chmod +x gradlew
 
-    - name: Download Clean Gradle Wrapper JAR
-      run: |
-        mkdir -p gradle/wrapper
-        curl -sL https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+    - name: Run Tests (Manual)
+      run: ./gradlew testDebugUnitTest --stacktrace --no-daemon
 
-    - name: Run Unit & Robolectric Tests
-      run: ./gradlew testDebugUnitTest --no-configuration-cache --stacktrace --no-daemon
+    - name: Build Debug APK (Manual)
+      run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-    - name: Build Release APK
-      run: ./gradlew assembleRelease --no-configuration-cache --stacktrace --no-daemon
+    - name: Build Release APK (Manual)
+      run: ./gradlew assembleRelease --stacktrace --no-daemon
 
-    - name: Upload Test Reports
-      if: always()
+    - name: Upload APKs (Manual)
       uses: actions/upload-artifact@v4
       with:
-        name: test-reports
-        path: app/build/reports/tests/testDebugUnitTest/
+        name: CFVPN-APKs
+        path: |
+          app/build/outputs/apk/debug/app-debug.apk
+          app/build/outputs/apk/release/app-release.apk
         if-no-files-found: ignore
-
-    - name: Upload Release APK
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: CFVPN-release-apk
-        path: app/build/outputs/apk/release/app-release.apk
-        if-no-files-found: error
