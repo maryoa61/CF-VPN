@@ -1,6 +1,7 @@
 package com.example
 // Sync trigger comment for GitHub
 
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -2600,12 +2601,6 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Xray Logcat Monitor")
-                    IconButton(
-                        onClick = { viewModel.simulator.clearLogs() },
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Icon(Icons.Default.Delete, contentDescription = "Clear Logs", tint = MaterialTheme.colorScheme.error)
-                    }
                 }
             },
             text = {
