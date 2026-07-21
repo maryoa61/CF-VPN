@@ -16,7 +16,21 @@ package com.example.vpn
 object Hev2Socks {
 
     init {
-        System.loadLibrary("hev-socks5-tunnel")
+        // IMPORTANT: do NOT System.loadLibrary("hev-socks5-tunnel") here.
+        // That upstream .so has its own internal JNI_OnLoad (meant for the
+        // upstream project's own Java class, which doesn't exist in this
+        // package). When ART explicitly loads a library via
+        // System.loadLibrary, it calls that library's JNI_OnLoad; upstream's
+        // FindClass() fails, returns null, and its RegisterNatives(null, ...)
+        // call hard-aborts the whole process ("JNI DETECTED ERROR IN
+        // APPLICATION: java_class == null in call to RegisterNatives").
+        //
+        // We only need hev-socks5-tunnel's plain C API (declared extern in
+        // hev_bridge.c), not its Java bindings. hev2socks_bridge already
+        // declares LOCAL_SHARED_LIBRARIES := hev-socks5-tunnel in Android.mk,
+        // so the dynamic linker pulls it in automatically as a normal ELF
+        // dependency when we load hev2socks_bridge below -- that path never
+        // triggers JNI_OnLoad, so the crash never happens.
         System.loadLibrary("hev2socks_bridge")
     }
 
