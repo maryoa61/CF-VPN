@@ -401,7 +401,14 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            // Must match android:foregroundServiceType="connectedDevice" in the manifest.
+            // On API 34+ (UPSIDE_DOWN_CAKE) Android enforces this match strictly and throws
+            // MissingForegroundServiceTypeException / SecurityException on mismatch.
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
