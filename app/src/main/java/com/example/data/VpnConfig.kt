@@ -30,8 +30,11 @@ data class VpnConfig(
     // Trojan-specific settings
     val password: String? = null,
 
-    // Shadowsocks-specific settings (password field above is reused as the SS password)
-    val ssMethod: String? = null, // e.g. "aes-256-gcm", "chacha20-ietf-poly1305"
+    // Shadowsocks-specific settings
+    val method: String? = null, // e.g. "aes-256-gcm", "chacha20-ietf-poly1305"
+
+    // VMess-specific settings
+    val alterId: Int = 0,
 
     // Fragment settings
     val fragmentEnabled: Boolean = false,
@@ -39,8 +42,8 @@ data class VpnConfig(
     val fragmentInterval: String? = "10-20",
     val fragmentPackets: String? = "tlshello",
 
-    // Comma-separated list of candidate edge/CDN IPs to scan and rotate through
-    // for TLS-fronted configs (see IpPoolManager). Null/empty = use the built-in
-    // default Cloudflare pool.
-    val ipPool: String? = null
+    // Edge-IP pool (comma-separated IPs). When set, every new connection is routed
+    // through a randomly-picked IP from this pool instead of always `address`,
+    // while keeping the same SNI/Host — mitigates per-IP traffic-volume throttling.
+    val edgeIps: String? = null
 )
