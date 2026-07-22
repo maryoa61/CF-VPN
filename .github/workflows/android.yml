@@ -1,30 +1,24 @@
 name: Android CI
-
 on:
   push:
     branches: [ "main", "master", "develop" ]
   pull_request:
     branches: [ "main", "master", "develop" ]
-
 permissions:
   contents: read
-
 jobs:
   build-and-test:
     name: Build & Test CFVPN
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-
     - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
         distribution: 'zulu'
         java-version: '21'
         cache: 'gradle'
-
     - name: Fetch native VPN engine sources
       run: |
         mkdir -p app/libs
@@ -34,10 +28,8 @@ jobs:
         # tun2socks engine source (compiled by Gradle's externalNativeBuild/ndkBuild)
         git clone --recursive https://github.com/heiher/hev-socks5-tunnel \
           app/src/main/jni/hev-socks5-tunnel
-
     - name: Write Debug Keystore Base64
       run: echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" > debug.keystore.base64
-
     - name: Decode Debug Keystore
       run: |
         if [ -f "debug.keystore.base64" ]; then
@@ -46,21 +38,34 @@ jobs:
         else
           echo "No debug.keystore.base64 found, skipping decode."
         fi
-
     - name: Grant Execute Permission to Gradlew
       run: chmod +x gradlew
-
     - name: Download Clean Gradle Wrapper JAR
       run: |
         mkdir -p gradle/wrapper
         curl -sL https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
-
     - name: Run Unit & Robolectric Tests
       run: ./gradlew testDebugUnitTest --no-configuration-cache --stacktrace --no-daemon
-
     - name: Build Release APK
       run: ./gradlew assembleRelease --no-configuration-cache --stacktrace --no-daemon
-
+    - name: Verify tun2socks library has no baked-in JNI bindings
+      run: |
+        set -e
+        APK="app/build/outputs/apk/release/app-release.apk"
+        WORKDIR=$(mktemp -d)
+        unzip -o -q "$APK" -d "$WORKDIR"
+        FOUND=0
+        for so in $(find "$WORKDIR/lib" -name "libhev-socks5-tunnel.so"); do
+          echo "Checking $so"
+          if nm -D --defined-only "$so" 2>/dev/null | grep -q "JNI_OnLoad"; then
+            echo "::error::$so exports JNI_OnLoad. Upstream hev-socks5-tunnel now bundles its own JNI bindings (FindClass will fail against this app's package and crash the process on load). Check whether upstream reverted the -DENABLE_LIBRARY, pure-C build mode, or pin hev-socks5-tunnel to a known-good commit."
+            FOUND=1
+          fi
+        done
+        if [ "$FOUND" -ne 0 ]; then
+          exit 1
+        fi
+        echo "OK: libhev-socks5-tunnel.so exports no JNI_OnLoad"
     - name: Upload Test Reports
       if: always()
       uses: actions/upload-artifact@v4
@@ -68,7 +73,6 @@ jobs:
         name: test-reports
         path: app/build/reports/tests/testDebugUnitTest/
         if-no-files-found: ignore
-
     - name: Upload Release APK
       if: success()
       uses: actions/upload-artifact@v4
