@@ -1,446 +1,100 @@
 package com.example.service
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.example.data.VpnConfig
-import com.example.vpn.Hev2Socks
-import com.example.vpn.VpnConnectionManager
-import com.example.vpn.VpnStatus
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
-import libv2ray.CoreCallbackHandler
-import libv2ray.CoreController
-import libv2ray.Libv2ray
-import org.json.JSONArray
-import org.json.JSONObject
+import com.example.data.ServerEntity
+import java.io.File
+import java.io.FileWriter
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Pipeline: TUN (tun0) -> hev2socks (tun2socks) -> Xray-core SOCKS inbound
- *           -> Xray-core Trojan outbound -> real server.
+ * سرویس اصلی VPN.
  *
- * Xray-core is NOT given the TUN fd directly (tunFd=0 in startLoop): it only
- * exposes a loopback SOCKS proxy on 127.0.0.1:SOCKS_PORT. hev2socks is the
- * component that actually reads/writes tun0 and bridges it to that SOCKS
- * proxy. This matches the architecture already built in this project
- * (Hev2Socks.kt / hev_bridge.c).
+ * معماری:
+ *   TUN fd  --(hev-socks5-tunnel، ترد نیتیو بلاکینگ)-->  SOCKS5 روی 127.0.0.1:10808  --(Xray-core)-->  سرور فیلترشکن
+ *
+ * توجه مهم: Xray-core هیچ آگاهی‌ای از لایه TUN/VPN ندارد. او فقط یک کلاینت/سرور SOCKS
+ * می‌بیند. تمام کار «تبدیل بسته‌های IP خام به کانکشن‌های TCP/UDP» را hev-socks5-tunnel
+ * به صورت نیتیو (native thread) انجام می‌دهد.
  */
-class XrayVpnService : VpnService(), CoreCallbackHandler {
+class V2RayVpnService : VpnService() {
 
     companion object {
-        const val EXTRA_CONFIG_JSON = "vpn_config_json"
-        private const val NOTIFICATION_CHANNEL_ID = "vpn_status_channel"
-        private const val NOTIFICATION_ID = 1
-        private const val SOCKS_PORT = 10808
-        private const val TUN_ADDRESS_V4 = "10.8.0.2"
-        private const val TUN_ADDRESS_V6 = "fd00::2"
-        private const val TUN_MTU = 1500
+        private const val TAG = "V2RayVpnService"
+
+        const val ACTION_START = "com.example.service.action.START"
+        const val ACTION_STOP = "com.example.service.action.STOP"
+        const val EXTRA_SERVER = "extra_server_entity"
+
+        private const val NOTIFICATION_CHANNEL_ID = "v2ray_vpn_channel"
+        private const val NOTIFICATION_ID = 1001
+
+        // مشخصات اینترفیس TUN - این مقادیر باید دقیقاً با فایل تنظیمات
+        // hev-socks5-tunnel (tunnel.yaml) هم‌خوانی داشته باشد.
+        private const val TUN_ADDRESS = "172.19.0.1"
+        private const val TUN_PREFIX_LENGTH = 30
+        private const val TUN_MTU = 1400
+        private const val TUN_DNS = "1.1.1.1"
+        private const val TUN_SESSION_NAME = "V2Ray VPN"
     }
 
-    private var vpnInterface: ParcelFileDescriptor? = null
-    private var coreController: CoreController? = null
-    private var coreEnvInitialized = false
+    // ------------------------------------------------------------------
+    // وضعیت داخلی سرویس
+    // ------------------------------------------------------------------
 
-    private val moshi by lazy { Moshi.Builder().add(KotlinJsonAdapterFactory()).build() }
+    private var tunInterface: ParcelFileDescriptor? = null
+    private var tunnelThread: Thread? = null
+    private val isRunning = AtomicBoolean(false)
+
+    // مسیر فایل کانفیگ Xray و فایل کانفیگ تونل که در cache ساخته می‌شوند
+    private lateinit var xrayConfigFile: File
+    private lateinit var tunnelConfigFile: File
+
+    // ------------------------------------------------------------------
+    // چرخه حیات سرویس
+    // ------------------------------------------------------------------
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        val manager = VpnConnectionManager.getInstance(this)
-
-        if (action == "STOP") {
-            manager.log("Disconnect command received from app interface")
-            stopVpn()
-            return START_NOT_STICKY
-        }
-
-        // The caller (VpnConnectionManager.toggleConnection()) is expected to
-        // serialize the selected VpnConfig with Moshi and pass it as this extra:
-        //   intent.putExtra(XrayVpnService.EXTRA_CONFIG_JSON,
-        //       moshi.adapter(VpnConfig::class.java).toJson(selectedConfig))
-        val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
-        if (configJson.isNullOrEmpty()) {
-            manager.log("Fatal: no VpnConfig payload supplied to service (missing EXTRA_CONFIG_JSON), aborting start")
-            manager.setStatus(VpnStatus.DISCONNECTED)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val config = try {
-            moshi.adapter(VpnConfig::class.java).fromJson(configJson)
-        } catch (e: Exception) {
-            manager.log("Fatal: failed to parse VpnConfig payload: ${e.message}")
-            manager.setStatus(VpnStatus.DISCONNECTED)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val supportedTypes = setOf("trojan", "vless", "vmess", "shadowsocks")
-        if (config == null || config.type !in supportedTypes) {
-            manager.log("Fatal: unsupported config type '${config?.type}'. Supported: $supportedTypes. " +
-                "(hysteria2/TUIC need a QUIC core that isn't bundled in this build.)")
-            manager.setStatus(VpnStatus.DISCONNECTED)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val missingSecret = when (config.type) {
-            "trojan" -> config.password.isNullOrEmpty()
-            "vless" -> config.uuid.isNullOrEmpty()
-            "vmess" -> config.uuid.isNullOrEmpty()
-            "shadowsocks" -> config.password.isNullOrEmpty() || config.method.isNullOrEmpty()
-            else -> true
-        }
-        if (missingSecret) {
-            manager.log("Fatal: '${config.name}' (${config.type}) is missing required credentials")
-            manager.setStatus(VpnStatus.DISCONNECTED)
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        manager.setStatus(VpnStatus.CONNECTING)
-        manager.log("Initializing core-level network tunnel configuration...")
-        startVpn(config)
-        return START_STICKY
-    }
-
-    private fun startVpn(config: VpnConfig) {
-        val manager = VpnConnectionManager.getInstance(this)
-        try {
-            if (vpnInterface != null) {
-                manager.log("startVpn() called while already connected, ignoring")
-                return
-            }
-
-            val builder = Builder()
-                .setSession("CFVPN_Secure_Tunnel")
-                .setMtu(TUN_MTU)
-                .addAddress(TUN_ADDRESS_V4, 32)
-                .addAddress(TUN_ADDRESS_V6, 128)
-
-            builder.addRoute("0.0.0.0", 0)
-            builder.addRoute("::", 0)
-            builder.addDnsServer("8.8.8.8")
-            builder.addDnsServer("1.1.1.1")
-            builder.addDnsServer("2001:4860:4860::8888")
-
-            // Exclude our own app from the tunnel. Without this, Xray-core's
-            // own outbound TCP connection to the Trojan server (opened by this
-            // same process) would get captured by the TUN interface and routed
-            // back into itself, creating a connection loop and killing the
-            // tunnel. This is the standard fix used by every Xray/V2Ray Android
-            // client, and it's simpler/more reliable here than VpnService.protect()
-            // since the current libv2ray CoreCallbackHandler doesn't expose a
-            // protect-socket callback to hook into.
-            try {
-                builder.addDisallowedApplication(packageName)
-            } catch (e: Exception) {
-                manager.log("Warning: could not exclude own app from tunnel: ${e.message}")
-            }
-
-            val pfd = builder.establish()
-            if (pfd == null) {
-                manager.log("Fatal: VpnService.Builder.establish() returned null (VPN permission revoked?)")
-                manager.setStatus(VpnStatus.DISCONNECTED)
-                return
-            }
-            vpnInterface = pfd
-            startForegroundNotification()
-
-            manager.log("Virtual TUN device created successfully: session=CFVPN_Secure_Tunnel, interface=tun0, MTU=$TUN_MTU")
-            manager.log("Local interface bound: $TUN_ADDRESS_V4/32 & $TUN_ADDRESS_V6/128")
-
-            if (!coreEnvInitialized) {
-                // Second arg is the XUDP base key; empty string = let the core
-                // generate/manage it internally. filesDir gives Xray a writable
-                // path for its asset/cert lookups.
-                Libv2ray.initCoreEnv(filesDir.absolutePath, "")
-                coreEnvInitialized = true
-            }
-
-            val xrayConfigJson = buildXrayConfig(config)
-            val controller = Libv2ray.newCoreController(this)
-            coreController = controller
-            // tunFd = 0: tell Xray-core not to manage the TUN device itself.
-            // It only opens a SOCKS inbound on 127.0.0.1:SOCKS_PORT; hev2socks
-            // (below) is what actually pumps packets between tun0 and that port.
-            controller.startLoop(xrayConfigJson, 0)
-            val poolInfo = config.edgeIps?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
-            if (poolInfo != null && poolInfo.size >= 2) {
-                manager.log("Xray-core started: ${config.type} outbound pool (${poolInfo.size} edge IPs, random per-connection) -> port ${config.port}, socks inbound -> 127.0.0.1:$SOCKS_PORT")
-            } else {
-                manager.log("Xray-core started: ${config.type} outbound -> ${config.address}:${config.port}, socks inbound -> 127.0.0.1:$SOCKS_PORT")
-            }
-
-            val hevConfig = buildHevConfig()
-            val hevResult = Hev2Socks.start(hevConfig, pfd.fd)
-            if (hevResult != 0) {
-                manager.log("Fatal: Hev2Socks.start returned error code $hevResult")
-                manager.setStatus(VpnStatus.DISCONNECTED)
+        when (intent?.action) {
+            ACTION_STOP -> {
                 stopVpn()
-                return
+                return START_NOT_STICKY
             }
-            manager.log("tun2socks bridge active: tun0 -> 127.0.0.1:$SOCKS_PORT")
-
-            manager.setStatus(VpnStatus.CONNECTED)
-            manager.log("System-wide VPN tunnel active. Routing 100% of IPv4/IPv6 traffic through tunnel.")
-        } catch (e: Exception) {
-            manager.log("Fatal: Failed to establish VPN tunnel: ${e.message}")
-            manager.setStatus(VpnStatus.DISCONNECTED)
-            e.printStackTrace()
-            stopVpn()
+            ACTION_START -> {
+                val server = intent.getParcelableExtraCompat<ServerEntity>(EXTRA_SERVER)
+                if (server == null) {
+                    Log.e(TAG, "ServerEntity ارسال نشده؛ سرویس متوقف می‌شود.")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                // برای جلوگیری از بلاک‌شدن ترد اصلی، ابتدا Foreground را بالا می‌آوریم
+                // (الزام اندروید ۸+ که باید ظرف چند ثانیه startForeground صدا زده شود)
+                startForeground(NOTIFICATION_ID, buildNotification())
+                startVpn(server)
+                return START_STICKY
+            }
+            else -> {
+                Log.w(TAG, "Action نامشخص؛ سرویس نادیده گرفته شد.")
+                return START_NOT_STICKY
+            }
         }
     }
 
-    /**
-     * Builds the Xray-core JSON config: SOCKS inbound (for hev2socks) + one outbound
-     * per supported protocol (vless / vmess / shadowsocks / trojan).
-     *
-     * IP-Pool mode: if config.edgeIps has 2+ comma-separated IPs, we emit one outbound
-     * per IP (same protocol/port/creds/SNI, only "address" differs) plus a routing
-     * balancer with strategy "random", so every *new* TCP/UDP connection picks a
-     * random edge IP while the TLS SNI / Host stay identical. This spreads traffic
-     * volume across IPs instead of hammering a single one (mitigates per-IP DPI
-     * throttling), without needing any active background scanning.
-     */
-    private fun buildXrayConfig(config: VpnConfig): String {
-        // Respect the security mode actually declared by the config/link. Many deployments
-        // behind a CDN (e.g. Cloudflare Workers, security=none&type=ws) rely on the CDN edge
-        // for TLS termination, so forcing "tls" here breaks the handshake.
-        val security = config.security?.takeIf { it.isNotEmpty() } ?: "none"
-
-        val inbound = JSONObject().apply {
-            put("tag", "socks-in")
-            put("listen", "127.0.0.1")
-            put("port", SOCKS_PORT)
-            put("protocol", "socks")
-            put("settings", JSONObject().apply {
-                put("auth", "noauth")
-                put("udp", true)
-                put("ip", "127.0.0.1")
-            })
-            put("sniffing", JSONObject().apply {
-                put("enabled", true)
-                put("destOverride", JSONArray().put("http").put("tls"))
-            })
-        }
-
-        val network = config.network ?: "tcp"
-
-        fun buildStreamSettings(): JSONObject = JSONObject().apply {
-            put("network", network)
-            put("security", security)
-            when (security) {
-                "tls" -> put("tlsSettings", JSONObject().apply {
-                    put("serverName", config.sni ?: config.address)
-                    put("allowInsecure", false)
-                })
-                "reality" -> put("realitySettings", JSONObject().apply {
-                    put("serverName", config.sni ?: config.address)
-                    put("publicKey", config.publicKey ?: "")
-                    put("shortId", config.shortId ?: "")
-                    put("fingerprint", "chrome")
-                })
-            }
-            if (network == "ws") {
-                put("wsSettings", JSONObject().apply {
-                    put("path", config.wsPath ?: "/")
-                    if (!config.wsHost.isNullOrEmpty()) {
-                        put("headers", JSONObject().apply { put("Host", config.wsHost) })
-                    }
-                })
-            }
-            // Client-Hello fragmentation: splits the TLS handshake into smaller TCP
-            // segments so DPI can't signature-match it in one shot. Real Xray-core
-            // sockopt field (present since v1.8+ of the core the libv2ray aar wraps).
-            if (config.fragmentEnabled) {
-                put("sockopt", JSONObject().apply {
-                    put("fragment", JSONObject().apply {
-                        put("packets", config.fragmentPackets ?: "tlshello")
-                        put("length", config.fragmentLength ?: "10-20")
-                        put("interval", config.fragmentInterval ?: "10-20")
-                    })
-                })
-            }
-        }
-
-        /** Builds one protocol-correct outbound for a given target IP/host. */
-        fun buildOutbound(tag: String, targetAddress: String): JSONObject {
-            val settings = JSONObject()
-            val protocol = when (config.type) {
-                "vless" -> {
-                    settings.put("vnext", JSONArray().put(JSONObject().apply {
-                        put("address", targetAddress)
-                        put("port", config.port)
-                        put("users", JSONArray().put(JSONObject().apply {
-                            put("id", config.uuid)
-                            put("encryption", "none")
-                            put("flow", config.flow?.takeIf { it != "none" } ?: "")
-                        }))
-                    }))
-                    "vless"
-                }
-                "vmess" -> {
-                    settings.put("vnext", JSONArray().put(JSONObject().apply {
-                        put("address", targetAddress)
-                        put("port", config.port)
-                        put("users", JSONArray().put(JSONObject().apply {
-                            put("id", config.uuid)
-                            put("alterId", config.alterId)
-                            put("security", "auto")
-                        }))
-                    }))
-                    "vmess"
-                }
-                "shadowsocks" -> {
-                    settings.put("servers", JSONArray().put(JSONObject().apply {
-                        put("address", targetAddress)
-                        put("port", config.port)
-                        put("method", config.method)
-                        put("password", config.password)
-                    }))
-                    "shadowsocks"
-                }
-                else -> { // trojan
-                    settings.put("servers", JSONArray().put(JSONObject().apply {
-                        put("address", targetAddress)
-                        put("port", config.port)
-                        put("password", config.password)
-                    }))
-                    "trojan"
-                }
-            }
-            return JSONObject().apply {
-                put("tag", tag)
-                put("protocol", protocol)
-                put("settings", settings)
-                put("streamSettings", buildStreamSettings())
-            }
-        }
-
-        val edgeIpPool = config.edgeIps?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
-        val outbounds = JSONArray()
-        val routing = JSONObject()
-
-        if (edgeIpPool.size >= 2) {
-            edgeIpPool.forEachIndexed { i, ip -> outbounds.put(buildOutbound("proxy-$i", ip)) }
-            routing.put("balancers", JSONArray().put(JSONObject().apply {
-                put("tag", "pool")
-                put("selector", JSONArray().put("proxy-"))
-                put("strategy", JSONObject().apply { put("type", "random") })
-            }))
-            routing.put("rules", JSONArray().put(JSONObject().apply {
-                put("type", "field")
-                put("network", "tcp,udp")
-                put("balancerTag", "pool")
-            }))
-        } else {
-            // Single target: "address" resolved by the OS/DNS as usual. Listed first,
-            // so it's the default outbound for unmatched traffic (no routing block needed).
-            outbounds.put(buildOutbound("proxy", config.address))
-        }
-
-        outbounds.put(JSONObject().apply {
-            put("tag", "direct"); put("protocol", "freedom"); put("settings", JSONObject())
-        })
-        outbounds.put(JSONObject().apply {
-            put("tag", "block"); put("protocol", "blackhole"); put("settings", JSONObject())
-        })
-
-        val root = JSONObject().apply {
-            put("log", JSONObject().apply { put("loglevel", "warning") })
-            put("inbounds", JSONArray().put(inbound))
-            put("outbounds", outbounds)
-            if (routing.has("rules")) put("routing", routing)
-        }
-
-        return root.toString()
-    }
-
-    /** Builds the hev-socks5-tunnel YAML config that bridges tun0 to Xray's local SOCKS inbound. */
-    private fun buildHevConfig(): String {
-        return """
-            tunnel:
-              name: tun0
-              mtu: $TUN_MTU
-              ipv4: $TUN_ADDRESS_V4
-              ipv6: '$TUN_ADDRESS_V6'
-
-            socks5:
-              port: $SOCKS_PORT
-              address: 127.0.0.1
-              udp: 'udp'
-
-            misc:
-              task-stack-size: 20480
-              connect-timeout: 5000
-              read-write-timeout: 60000
-              log-level: warn
-        """.trimIndent()
-    }
-
-    private fun startForegroundNotification() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "VPN Status",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            manager.createNotificationChannel(channel)
-        }
-
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("VPN Connected")
-            .setContentText("Tunnel is active")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setOngoing(true)
-            .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Must match android:foregroundServiceType="connectedDevice" in the manifest.
-            // On API 34+ (UPSIDE_DOWN_CAKE) Android enforces this match strictly and throws
-            // MissingForegroundServiceTypeException / SecurityException on mismatch.
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-    }
-
-    private fun stopVpn() {
-        val manager = VpnConnectionManager.getInstance(this)
-
-        try {
-            Hev2Socks.stop()
-        } catch (e: Exception) {
-            manager.log("Error stopping tun2socks bridge: ${e.message}")
-        }
-
-        try {
-            coreController?.stopLoop()
-        } catch (e: Exception) {
-            manager.log("Error stopping Xray-core: ${e.message}")
-        }
-        coreController = null
-
-        try {
-            vpnInterface?.close()
-            vpnInterface = null
-            manager.log("Virtual TUN interface tun0 has been closed")
-        } catch (e: Exception) {
-            manager.log("Error closing TUN interface: ${e.message}")
-            e.printStackTrace()
-        }
-
-        manager.setStatus(VpnStatus.DISCONNECTED)
-        stopSelf()
+    override fun onRevoke() {
+        // این متد وقتی صدا زده می‌شود که کاربر از تنظیمات سیستم دسترسی VPN را
+        // برای اپ دیگری فعال کند یا مستقیماً وی‌پی‌ان را از سیستم قطع کند.
+        Log.i(TAG, "onRevoke فراخوانی شد؛ در حال توقف ایمن سرویس.")
+        stopVpn()
+        super.onRevoke()
     }
 
     override fun onDestroy() {
@@ -448,14 +102,339 @@ class XrayVpnService : VpnService(), CoreCallbackHandler {
         super.onDestroy()
     }
 
-    // --- libv2ray.CoreCallbackHandler ---
+    // ------------------------------------------------------------------
+    // راه‌اندازی
+    // ------------------------------------------------------------------
 
-    override fun startup(): Long = 0
+    private fun startVpn(server: ServerEntity) {
+        if (isRunning.get()) {
+            Log.w(TAG, "سرویس از قبل در حال اجراست؛ درخواست تکراری نادیده گرفته شد.")
+            return
+        }
 
-    override fun shutdown(): Long = 0
+        try {
+            // مرحله ۱: تولید و ذخیره کانفیگ Xray
+            xrayConfigFile = File(cacheDir, "xray_config.json")
+            val xrayConfigJson = XrayConfigGenerator.generate(server, filesDir)
+            xrayConfigFile.writeText(xrayConfigJson)
+            Log.d(TAG, "کانفیگ Xray در ${xrayConfigFile.absolutePath} نوشته شد.")
 
-    override fun onEmitStatus(code: Long, message: String): Long {
-        VpnConnectionManager.getInstance(this).log("Xray-core [$code]: $message")
-        return 0
+            // مرحله ۲: استارت هسته Xray (به صورت داخل-پروسه/JNI، غیر بلاکینگ)
+            startXrayCore(xrayConfigFile)
+
+            // مرحله ۳: ساخت اینترفیس TUN با VpnService.Builder
+            val establishedFd = establishTunInterface()
+                ?: throw IllegalStateException("establish() مقدار null برگرداند - مجوز VPN تایید نشده یا Builder نامعتبر است.")
+            tunInterface = establishedFd
+
+            // مرحله ۴: نوشتن فایل تنظیمات YAML برای hev-socks5-tunnel
+            tunnelConfigFile = File(cacheDir, "tunnel_config.yaml")
+            HevSocks5Tunnel.writeConfig(
+                outFile = tunnelConfigFile,
+                tunFd = establishedFd.fd,
+                mtu = TUN_MTU,
+                socksHost = "127.0.0.1",
+                socksPort = XrayConfigGenerator.SOCKS_INBOUND_PORT
+            )
+
+            // مرحله ۵: اجرای ترد نیتیو بلاکینگ hev-socks5-tunnel
+            // این متد تا زمانی که stop() صدا زده نشود برنمی‌گردد، پس حتماً
+            // باید در یک ترد جدا (نه ترد اصلی/Binder) اجرا شود.
+            tunnelThread = Thread({
+                try {
+                    Log.i(TAG, "ترد hev-socks5-tunnel شروع شد.")
+                    HevSocks5Tunnel.start(tunnelConfigFile.absolutePath, establishedFd.fd)
+                    Log.i(TAG, "ترد hev-socks5-tunnel به پایان رسید (متد start برگشت).")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "خطای غیرمنتظره در ترد تونل: ${t.message}", t)
+                    // اگر تونل به‌طور غیرمنتظره کرش کند، کل سرویس را با احتیاط متوقف می‌کنیم
+                    // تا در وضعیت نیمه‌فعال (نشت‌آفرین) باقی نماند.
+                    stopVpn()
+                }
+            }, "hev-socks5-tunnel-thread").apply {
+                isDaemon = true
+                start()
+            }
+
+            isRunning.set(true)
+            Log.i(TAG, "V2RayVpnService با موفقیت راه‌اندازی شد.")
+        } catch (e: Exception) {
+            Log.e(TAG, "خطا در راه‌اندازی VPN: ${e.message}", e)
+            // در صورت بروز خطا در هر مرحله، همه چیزی که تا اینجا باز شده را پاک‌سازی می‌کنیم
+            cleanupAfterFailure()
+            stopSelf()
+        }
+    }
+
+    /**
+     * ساخت و برقراری (establish) اینترفیس TUN.
+     * تمام پارامترهای Builder دقیقاً باید با فایل YAML تونل هم‌خوانی داشته باشند.
+     */
+    private fun establishTunInterface(): ParcelFileDescriptor? {
+        val builder = Builder()
+            .setSession(TUN_SESSION_NAME)
+            .setMtu(TUN_MTU)
+            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)
+            .addDnsServer(TUN_DNS)
+            // هدایت تمام ترافیک IPv4 و IPv6 به داخل تونل.
+            // نکته: اگر بخواهید فعلاً IPv6 را کامل مسدود کنید (رایج‌ترین علت نشت IPv6)
+            // به‌جای addRoute("::/0",0) اصلاً آدرس IPv6 اضافه نکنید تا سیستم مسیر IPv6
+            // را به‌کل غیرفعال کند؛ در اینجا چون addRoute صدا زده می‌شود، ترافیک IPv6
+            // هم داخل تونل هدایت می‌شود (لازم است tunnel هم از IPv6 پشتیبانی کند).
+            .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
+            .allowFamily(android.system.OsConstants.AF_INET)
+            .allowFamily(android.system.OsConstants.AF_INET6)
+
+        // ------------------------------------------------------------------
+        // Split Tunneling (Allow/Disallow Apps)
+        // فقط یکی از دو حالت زیر باید فعال باشد؛ اندروید اگر هر دو صدا زده شوند
+        // IllegalArgumentException می‌دهد. اینجا به صورت پیش‌فرض هیچ‌کدام صدا
+        // زده نمی‌شود (یعنی همه اپ‌ها داخل تونل هستند) و کد نمونه برای توسعه بعدی
+        // شما به صورت کامنت آماده است.
+        // ------------------------------------------------------------------
+        //
+        // حالت الف) فقط اپ‌های مشخص از تونل عبور کنند (Whitelist):
+        // try {
+        //     builder.addAllowedApplication("com.example.someapp")
+        // } catch (e: PackageManager.NameNotFoundException) {
+        //     Log.w(TAG, "پکیج پیدا نشد: ${e.message}")
+        // }
+        //
+        // حالت ب) همه اپ‌ها داخل تونل باشند به‌جز موارد استثنا (Blacklist) -
+        // مثلاً اپ‌های بانکی که معمولاً به دلیل SSL Pinning یا سیاست‌های امنیتی
+        // بهتر است از تونل خارج بمانند:
+        // val excludedApps = listOf(
+        //     "com.bank.mellat",
+        //     "com.bank.melli",
+        //     "ir.shaparak.samanpardakht"
+        // )
+        // excludedApps.forEach { pkg ->
+        //     try {
+        //         builder.addDisallowedApplication(pkg)
+        //     } catch (e: PackageManager.NameNotFoundException) {
+        //         Log.w(TAG, "پکیج $pkg پیدا نشد؛ نادیده گرفته شد.")
+        //     }
+        // }
+        //
+        // نکته حیاتی: خود اپلیکیشن جاری (پکیج خودتان) را همیشه باید یا با
+        // addDisallowedApplication از تونل خارج کنید یا مطمئن شوید سوکت خروجی
+        // Xray با protect() از تونل خارج شده (که در این کد از طریق متد protect
+        // انجام می‌شود). در غیر این صورت لوپ اتصال (Loopback Loop) رخ می‌دهد.
+
+        return builder.establish()
+    }
+
+    // ------------------------------------------------------------------
+    // محافظت از سوکت خروجی (جلوگیری از لوپ)
+    // ------------------------------------------------------------------
+
+    /**
+     * این متد باید از سمت لایه نیتیو Xray (از طریق JNI callback) صدا زده شود،
+     * درست در لحظه‌ای که Xray سوکت TCP/UDP خروجی به سمت سرور واقعی فیلترشکن را
+     * می‌سازد (قبل از connect). اگر این سوکت protect نشود، بسته‌های خروجی آن
+     * دوباره وارد TUN می‌شوند و یک حلقه بی‌نهایت (loopback loop) ایجاد می‌کنند
+     * که هم باعث قطعی کامل اینترنت می‌شود و هم مصرف batteries/CPU را می‌ترکاند.
+     *
+     * @param socketFd فایل دسکریپتور خام سوکت (از JNI/native layer دریافت می‌شود)
+     * @return true اگر protect موفق بود
+     */
+    fun protectSocket(socketFd: Int): Boolean {
+        return try {
+            val result = protect(socketFd)
+            if (!result) {
+                Log.w(TAG, "protect() برای fd=$socketFd شکست خورد.")
+            }
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "خطا هنگام protect کردن سوکت: ${e.message}", e)
+            false
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // هسته Xray (شبیه‌سازی شده - در پروژه واقعی از طریق JNI/AAR به لایبرری
+    // نیتیو Xray یا از طریق libv2ray/Xray wrapper وصل می‌شود)
+    // ------------------------------------------------------------------
+
+    /**
+     * شروع هسته Xray با فایل کانفیگ تولید شده.
+     *
+     * در پیاده‌سازی واقعی این متد معمولاً یکی از این دو شکل را دارد:
+     *   ۱) فراخوانی یک متد JNI مثل: XrayCoreJNI.run(configFile.absolutePath)
+     *      که خودِ Xray-core (نوشته‌شده به Go و کامپایل‌شده با gomobile) را در
+     *      یک ترد داخلی خودش (نه ترد شما) اجرا می‌کند و بلافاصله برمی‌گردد.
+     *   ۲) استفاده از AAR رسمی مثل libXray که متدهایی مثل
+     *      `Libv2ray.runV2Ray(...)` را expose می‌کند.
+     *
+     * نکته مهم: بر خلاف hev-socks5-tunnel، اجرای Xray-core از طریق gomobile
+     * بلاکینگ نیست (خودش داخلاً گوروتین‌های Go را مدیریت می‌کند)، پس نیازی به
+     * ساخت Thread جداگانه در این‌جا نیست؛ اما لاگ خطا و try/catch الزامی است
+     * چون هرگونه خطای parse در کانفیگ JSON باعث پرتاب Exception از JNI می‌شود.
+     */
+    private fun startXrayCore(configFile: File) {
+        if (!configFile.exists()) {
+            throw IllegalStateException("فایل کانفیگ Xray پیدا نشد: ${configFile.absolutePath}")
+        }
+        // TODO: جایگزین کنید با فراخوانی واقعی JNI، مثلاً:
+        // val errorMsg = Libv2ray.runV2Ray(configFile.absolutePath)
+        // if (!errorMsg.isNullOrEmpty()) {
+        //     throw IllegalStateException("Xray-core شروع نشد: $errorMsg")
+        // }
+        Log.i(TAG, "startXrayCore فراخوانی شد با مسیر: ${configFile.absolutePath} (شبیه‌سازی شده)")
+    }
+
+    /**
+     * توقف هسته Xray. در پیاده‌سازی واقعی معادل چیزی شبیه
+     * Libv2ray.stopV2Ray() یا XrayCoreJNI.stop() است.
+     */
+    private fun stopXrayCore() {
+        // TODO: جایگزین کنید با فراخوانی واقعی، مثلاً: Libv2ray.stopV2Ray()
+        Log.i(TAG, "stopXrayCore فراخوانی شد (شبیه‌سازی شده)")
+    }
+
+    // ------------------------------------------------------------------
+    // توقف و پاک‌سازی
+    // ------------------------------------------------------------------
+
+    /**
+     * توقف کامل و ایمن سرویس.
+     * ترتیب بستن منابع بسیار مهم است و باید دقیقاً «معکوسِ» ترتیب ساخت آن‌ها باشد:
+     *   ۱) اول tunnel نیتیو (hev-socks5-tunnel) را متوقف می‌کنیم تا دیگر از fd استفاده نکند
+     *   ۲) سپس خود ParcelFileDescriptor تونل را می‌بندیم
+     *   ۳) در آخر هسته Xray را متوقف می‌کنیم
+     * اگر این ترتیب رعایت نشود ممکن است hev-socks5-tunnel روی fd بسته‌شده
+     * عملیات read/write انجام دهد و باعث native crash (SIGSEGV) شود.
+     */
+    private fun stopVpn() {
+        if (!isRunning.getAndSet(false)) {
+            // از فراخوانی تکراری/همزمان جلوگیری می‌کند
+            Log.d(TAG, "stopVpn فراخوانی شد اما سرویس از قبل متوقف بوده.")
+            return
+        }
+
+        Log.i(TAG, "در حال توقف ایمن VPN...")
+
+        // مرحله ۱: توقف ترد بلاکینگ تونل
+        try {
+            HevSocks5Tunnel.stop()
+        } catch (e: Exception) {
+            Log.e(TAG, "خطا هنگام توقف hev-socks5-tunnel: ${e.message}", e)
+        }
+
+        // منتظر می‌مانیم ترد نیتیو واقعاً از متد start() برگردد (حداکثر ۲ ثانیه،
+        // تا اپ در onDestroy برای همیشه بلاک نشود)
+        try {
+            tunnelThread?.join(2000)
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "join ترد تونل قطع شد: ${e.message}")
+            Thread.currentThread().interrupt()
+        }
+        tunnelThread = null
+
+        // مرحله ۲: بستن ایمن ParcelFileDescriptor - همیشه در try/finally
+        try {
+            tunInterface?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "خطا هنگام بستن ParcelFileDescriptor: ${e.message}", e)
+        } finally {
+            tunInterface = null
+        }
+
+        // مرحله ۳: توقف هسته Xray
+        try {
+            stopXrayCore()
+        } catch (e: Exception) {
+            Log.e(TAG, "خطا هنگام توقف Xray-core: ${e.message}", e)
+        }
+
+        // پاک‌سازی فایل‌های موقت کانفیگ (اختیاری اما توصیه‌شده برای امنیت/فضا)
+        runCatching { if (::xrayConfigFile.isInitialized) xrayConfigFile.delete() }
+        runCatching { if (::tunnelConfigFile.isInitialized) tunnelConfigFile.delete() }
+
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+
+        Log.i(TAG, "VPN با موفقیت متوقف شد.")
+    }
+
+    /**
+     * پاک‌سازی ویژه‌ی حالت خطا هنگام startVpn (قبل از اینکه isRunning=true شود).
+     * چون ترتیب دقیق مراحل شکست‌خورده نامشخص است، هر منبع را جداگانه و
+     * محافظت‌شده (try/catch مجزا) می‌بندیم تا یک خطا مانع بسته‌شدن بقیه نشود.
+     */
+    private fun cleanupAfterFailure() {
+        runCatching { tunnelThread?.interrupt() }
+        tunnelThread = null
+
+        runCatching { HevSocks5Tunnel.stop() }
+
+        runCatching { tunInterface?.close() }
+        tunInterface = null
+
+        runCatching { stopXrayCore() }
+
+        isRunning.set(false)
+    }
+
+    // ------------------------------------------------------------------
+    // Notification برای Foreground Service
+    // ------------------------------------------------------------------
+
+    private fun buildNotification(): Notification {
+        createNotificationChannelIfNeeded()
+
+        val stopIntent = Intent(this, V2RayVpnService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("اتصال VPN فعال است")
+            .setContentText("در حال محافظت از ترافیک شما")
+            .setSmallIcon(android.R.drawable.ic_lock_lock) // آیکون واقعی پروژه خود را جایگزین کنید
+            .setOngoing(true) // کاربر نمی‌تواند با سوایپ آن را ببندد
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "قطع اتصال",
+                stopPendingIntent
+            )
+            .build()
+    }
+
+    private fun createNotificationChannelIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "اتصال VPN",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "نمایش وضعیت فعال اتصال VPN"
+                    setShowBadge(false)
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// Helper: خواندن ایمن Parcelable با سازگاری روی نسخه‌های مختلف اندروید
+// (getParcelableExtra ساده در اندروید ۱۳+ Deprecated شده است)
+// ------------------------------------------------------------------
+private inline fun <reified T : android.os.Parcelable> Intent.getParcelableExtraCompat(key: String): T? {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        getParcelableExtra(key, T::class.java)
+    } else {
+        @Suppress("DEPRECATION")
+        getParcelableExtra(key) as? T
     }
 }
