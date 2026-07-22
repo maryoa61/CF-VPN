@@ -25,9 +25,40 @@ jobs:
         # Xray-core prebuilt AAR (Trojan/VLESS/VMess client engine)
         curl -sL -o app/libs/libv2ray.aar \
           https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar
-        # tun2socks engine source (compiled by Gradle's externalNativeBuild/ndkBuild)
+        # tun2socks engine source (compiled ourselves below, NOT via their Android.mk)
         git clone --recursive https://github.com/heiher/hev-socks5-tunnel \
           app/src/main/jni/hev-socks5-tunnel
+    - name: Build clean tun2socks static library (no JNI) for all ABIs
+      run: |
+        set -e
+        NDK_VERSION="26.1.10909125"
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+        NDK_DIR="$ANDROID_HOME/ndk/$NDK_VERSION"
+        TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        SRC_DIR="app/src/main/jni/hev-socks5-tunnel"
+        API=24
+
+        declare -A TARGETS=(
+          [arm64-v8a]=aarch64-linux-android
+          [armeabi-v7a]=armv7a-linux-androideabi
+          [x86]=i686-linux-android
+          [x86_64]=x86_64-linux-android
+        )
+
+        for ABI in "${!TARGETS[@]}"; do
+          TRIPLE="${TARGETS[$ABI]}"
+          echo "== Building libhev-socks5-tunnel.a for $ABI =="
+          make -C "$SRC_DIR" clean || true
+          CC="$TOOLCHAIN/${TRIPLE}${API}-clang" \
+          AR="$TOOLCHAIN/llvm-ar" \
+          CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY" \
+          make -C "$SRC_DIR" static -j"$(nproc)"
+
+          OUT_DIR="app/src/main/jni/prebuilt/$ABI"
+          mkdir -p "$OUT_DIR"
+          cp "$SRC_DIR"/libhev-socks5-tunnel.a "$OUT_DIR/"
+          echo "-> $OUT_DIR/libhev-socks5-tunnel.a"
+        done
     - name: Write Debug Keystore Base64
       run: echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" > debug.keystore.base64
     - name: Decode Debug Keystore
@@ -48,24 +79,35 @@ jobs:
       run: ./gradlew testDebugUnitTest --no-configuration-cache --stacktrace --no-daemon
     - name: Build Release APK
       run: ./gradlew assembleRelease --no-configuration-cache --stacktrace --no-daemon
-    - name: Verify tun2socks library has no baked-in JNI bindings
+    - name: Verify tun2socks engine has no baked-in JNI bindings
       run: |
         set -e
         APK="app/build/outputs/apk/release/app-release.apk"
         WORKDIR=$(mktemp -d)
         unzip -o -q "$APK" -d "$WORKDIR"
         FOUND=0
+
+        # There should be no standalone libhev-socks5-tunnel.so anymore --
+        # it must be statically linked into hev2socks_bridge.so. If it shows
+        # up as its own file, Android.mk fell back to include-ing upstream's
+        # Android.mk (shared-lib build) instead of the prebuilt static .a.
         for so in $(find "$WORKDIR/lib" -name "libhev-socks5-tunnel.so"); do
-          echo "Checking $so"
+          echo "::error::$so exists as a standalone shared library. Expected it to be statically linked into libhev2socks_bridge.so instead."
+          FOUND=1
+        done
+
+        # Whatever native libraries we do ship, none of them should export a
+        # JNI_OnLoad that targets a foreign package's Java classes.
+        for so in $(find "$WORKDIR/lib" -name "*.so"); do
           if nm -D --defined-only "$so" 2>/dev/null | grep -q "JNI_OnLoad"; then
-            echo "::error::$so exports JNI_OnLoad. Upstream hev-socks5-tunnel now bundles its own JNI bindings (FindClass will fail against this app's package and crash the process on load). Check whether upstream reverted the -DENABLE_LIBRARY, pure-C build mode, or pin hev-socks5-tunnel to a known-good commit."
-            FOUND=1
+            echo "$so exports JNI_OnLoad -- inspect manually to confirm it targets this app's own package (e.g. libgojni.so from libv2ray.aar is expected here)."
           fi
         done
+
         if [ "$FOUND" -ne 0 ]; then
           exit 1
         fi
-        echo "OK: libhev-socks5-tunnel.so exports no JNI_OnLoad"
+        echo "OK: no standalone libhev-socks5-tunnel.so shipped"
     - name: Upload Test Reports
       if: always()
       uses: actions/upload-artifact@v4
