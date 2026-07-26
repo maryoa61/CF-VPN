@@ -105,13 +105,12 @@ jobs:
           mkdir -p "$OUT"
           MERGED="$OUT/libhev-socks5-tunnel.a"
 
-          # Merge all 4 static libs using ar script mode
+          # Merge available static libs using ar script mode
           AR_SCRIPT=/tmp/ar_merge.txt
           echo "CREATE $MERGED" > "$AR_SCRIPT"
-          echo "ADDLIB $SRC/bin/libhev-socks5-tunnel.a" >> "$AR_SCRIPT"
-          echo "ADDLIB $SRC/bin/libhev-task-system.a" >> "$AR_SCRIPT"
-          echo "ADDLIB $SRC/bin/libyaml.a" >> "$AR_SCRIPT"
-          echo "ADDLIB $SRC/bin/liblwip.a" >> "$AR_SCRIPT"
+          for lib in libhev-socks5-tunnel.a libhev-task-system.a libyaml.a liblwip.a; do
+            [ -f "$SRC/bin/$lib" ] && echo "ADDLIB $SRC/bin/$lib" >> "$AR_SCRIPT"
+          done
           echo "SAVE" >> "$AR_SCRIPT"
           echo "END" >> "$AR_SCRIPT"
           "$TC/llvm-ar" -M < "$AR_SCRIPT"
