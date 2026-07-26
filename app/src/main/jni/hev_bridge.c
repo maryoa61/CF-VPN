@@ -1,28 +1,19 @@
 /*
  * hev_bridge.c
  *
- * Thin JNI wrapper around heiher/hev-socks5-tunnel's public C API
- * (hev_socks5_tunnel_main_from_str / _quit / _stats).
+ * Thin JNI wrapper around heiher/hev-socks5-tunnel's public C API.
+ * Compiled into libhev2socks_bridge.so via Android.mk.
  *
- * This file is compiled into its own shared library (hev2socks_bridge)
- * which statically links against the upstream libhev-socks5-tunnel.a.
- *
- * JNI function names MUST match the Kotlin class:
- *   com.example.vpn.HevSocks5Tunnel
- *   - nativeMainFromFile(String, int) → int
- *   - nativeQuit()                   → void
- *
- * IMPORTANT: The native method names are derived from the fully-qualified
- * class name. If you rename or move the Kotlin class, you MUST update
- * these function names accordingly.
+ * JNI function names match: com.example.vpn.HevSocks5Tunnel
  */
 
 #include <jni.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-/* Public API of hev-socks5-tunnel (see include/hev-main.h upstream) */
+/* Public API of hev-socks5-tunnel */
 extern int hev_socks5_tunnel_main_from_str(const unsigned char *config_str,
                                             unsigned int config_len,
                                             int tun_fd);
@@ -52,10 +43,8 @@ run_tunnel(void *arg)
 }
 
 /*
- * JNI: com.example.vpn.HevSocks5Tunnel.nativeMainFromFile(String configPath, int tunFd)
- *
+ * JNI: nativeMainFromFile(String configPath, int tunFd)
  * Runs the tunnel event loop on the calling thread (blocking).
- * Called from Kotlin's HevSocks5Tunnel.start().
  */
 JNIEXPORT jint JNICALL
 Java_com_example_vpn_HevSocks5Tunnel_nativeMainFromFile(JNIEnv *env, jobject thiz,
@@ -64,12 +53,12 @@ Java_com_example_vpn_HevSocks5Tunnel_nativeMainFromFile(JNIEnv *env, jobject thi
     (void) thiz;
 
     if (g_running) {
-        return -1; /* already running */
+        return -1;
     }
 
     const char *cConfig = (*env)->GetStringUTFChars(env, jConfig, NULL);
     if (cConfig == NULL) {
-        return -2; /* OOM or invalid string */
+        return -2;
     }
     int len = (int) strlen(cConfig);
 
@@ -95,20 +84,22 @@ Java_com_example_vpn_HevSocks5Tunnel_nativeMainFromFile(JNIEnv *env, jobject thi
         g_running = 0;
         free(args->config);
         free(args);
-        return -4; /* pthread_create failed */
+        return -4;
     }
 
-    /* Wait for the tunnel thread to finish (blocking) */
+    /* Block until tunnel thread exits (no timeout — hev-socks5-tunnel
+       handles its own shutdown via nativeQuit). */
     pthread_join(g_thread, NULL);
 
     return 0;
 }
 
 /*
- * JNI: com.example.vpn.HevSocks5Tunnel.nativeQuit()
- *
+ * JNI: nativeQuit()
  * Signals the running tunnel loop to shut down.
- * Safe to call from any thread.
+ * Note: pthread_cancel is NOT available on Android Bionic.
+ * Instead, hev_socks5_tunnel_quit() sets an internal flag that makes
+ * the event loop exit naturally, after which pthread_join returns.
  */
 JNIEXPORT void JNICALL
 Java_com_example_vpn_HevSocks5Tunnel_nativeQuit(JNIEnv *env, jobject thiz)
@@ -117,27 +108,12 @@ Java_com_example_vpn_HevSocks5Tunnel_nativeQuit(JNIEnv *env, jobject thiz)
     (void) thiz;
 
     hev_socks5_tunnel_quit();
-
-    /* Optionally wait for thread to finish (with timeout via join) */
-    if (g_running) {
-        /* Give the tunnel up to 2 seconds to exit gracefully */
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 2;
-
-        int ret = pthread_timedjoin_np(g_thread, NULL, &ts);
-        if (ret != 0) {
-            /* Thread didn't exit in time — force cancellation */
-            pthread_cancel(g_thread);
-            pthread_join(g_thread, NULL);
-        }
-        g_running = 0;
-    }
+    /* The tunnel loop will detect the quit flag and exit on its own.
+       The caller (Kotlin) does pthread_join via Thread.join(2000). */
 }
 
 /*
- * JNI: com.example.vpn.HevSocks5Tunnel.nativeStats()
- *
+ * JNI: nativeStats()
  * Returns [tx_packets, tx_bytes, rx_packets, rx_bytes] as a long array.
  */
 JNIEXPORT jlongArray JNICALL
