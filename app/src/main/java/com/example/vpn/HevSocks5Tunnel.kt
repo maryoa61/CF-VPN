@@ -1,4 +1,4 @@
-package com.example.service
+package com.example.vpn
 
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -15,20 +15,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * SOCKS5 endpoint — in our case Xray's own "socks-in" inbound on
  * 127.0.0.1:$SOCKS_INBOUND_PORT (see XrayConfigGenerator).
  *
- * REQUIRES: libhev-socks5-tunnel.so present under
+ * REQUIRES: libhev2socks_bridge.so present under
  * src/main/jniLibs/<abi>/ for every ABI you ship (arm64-v8a at minimum).
- * See the Gradle `downloadHevSocks5Tunnel` task (to be added to
- * build.gradle.kts) for how that .so gets there.
+ * This .so is built by the Android.mk in jni/ which links the prebuilt
+ * libhev-socks5-tunnel.a with hev_bridge.c (JNI wrapper).
  */
 object HevSocks5Tunnel {
 
-    // Was a plain @Volatile Boolean before. That's fine for visibility but
-    // gives no atomicity: two threads could both read isRunning == true and
-    // both proceed to call nativeQuit(), which is exactly the double-call
-    // that was corrupting native state and crashing the process. isRunning
-    // now also doubles as "is a session currently open", and stopRequested
-    // guarantees nativeQuit() fires at most once per start()/stop() cycle
-    // even under concurrent callers.
     private val isRunning = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
 
@@ -39,14 +32,14 @@ object HevSocks5Tunnel {
 
     init {
         try {
-            System.loadLibrary("hev-socks5-tunnel")
+            // IMPORTANT: This must match the LOCAL_MODULE name in Android.mk.
+            // Android.mk builds "hev2socks_bridge" → libhev2socks_bridge.so
+            System.loadLibrary("hev2socks_bridge")
             libraryLoaded = true
         } catch (e: UnsatisfiedLinkError) {
-            // Most likely cause: libhev-socks5-tunnel.so isn't present under
-            // jniLibs/<abi>/ for this ABI — e.g. the Gradle task that downloads
-            // and places it hasn't run, or ran for the wrong ABI. Swallow it here
-            // so referencing this object doesn't crash the whole app; start()
-            // will instead throw a clear, catchable IllegalStateException below.
+            // Most likely cause: libhev2socks_bridge.so isn't present under
+            // jniLibs/<abi>/ for this ABI — e.g. the Gradle NDK build hasn't
+            // run, or ran for the wrong ABI.
             libraryLoadError = e
         }
     }
@@ -67,13 +60,14 @@ object HevSocks5Tunnel {
 
     /**
      * Starts the tunnel and blocks until it stops. Call this from a
-     * dedicated Thread (see V2RayVpnService), not from a coroutine.
+     * dedicated Thread (see XrayVpnService), not from a coroutine.
      */
     fun start(configPath: String, tunFd: Int): Int {
         if (!libraryLoaded) {
             throw IllegalStateException(
-                "libhev-socks5-tunnel.so failed to load (${libraryLoadError?.message}). " +
-                "Check that it's bundled under jniLibs/<abi>/ for this device's ABI.",
+                "libhev2socks_bridge.so failed to load (${libraryLoadError?.message}). " +
+                "Ensure the NDK build ran successfully and the .so is bundled " +
+                "under jniLibs/<abi>/ for this device's ABI.",
                 libraryLoadError
             )
         }
