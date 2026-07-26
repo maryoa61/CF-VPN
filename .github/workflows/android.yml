@@ -90,16 +90,15 @@ jobs:
           MERGED="$OUT/libhev-socks5-tunnel.a"
 
           # Merge all 4 static libs using ar script mode
-          cat > /tmp/ar_merge.txt <<ARLIST
-          CREATE $MERGED
-          ADDLIB $SRC/bin/libhev-socks5-tunnel.a
-          ADDLIB $SRC/bin/libhev-task-system.a
-          ADDLIB $SRC/bin/libyaml.a
-          ADDLIB $SRC/bin/liblwip.a
-          SAVE
-          END
-          ARLIST
-          "$TC/llvm-ar" -M < /tmp/ar_merge.txt
+          AR_SCRIPT=/tmp/ar_merge.txt
+          echo "CREATE $MERGED" > "$AR_SCRIPT"
+          echo "ADDLIB $SRC/bin/libhev-socks5-tunnel.a" >> "$AR_SCRIPT"
+          echo "ADDLIB $SRC/bin/libhev-task-system.a" >> "$AR_SCRIPT"
+          echo "ADDLIB $SRC/bin/libyaml.a" >> "$AR_SCRIPT"
+          echo "ADDLIB $SRC/bin/liblwip.a" >> "$AR_SCRIPT"
+          echo "SAVE" >> "$AR_SCRIPT"
+          echo "END" >> "$AR_SCRIPT"
+          "$TC/llvm-ar" -M < "$AR_SCRIPT"
 
           SIZE=$(du -h "$MERGED" | cut -f1)
           SYM=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -c "T " || true)
