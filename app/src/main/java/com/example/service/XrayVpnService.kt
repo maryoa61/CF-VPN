@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.data.VpnConfig
 import com.example.vpn.HevSocks5Tunnel
+import com.example.service.XrayConfigGenerator
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import java.io.File

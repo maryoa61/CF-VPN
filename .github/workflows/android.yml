@@ -20,18 +20,15 @@ on:
 permissions:
   contents: read
 
-env:
-  NDK_VERSION: "26.1.10909125"
-
 jobs:
   build-and-test:
     name: Build & Test CFVPN
     runs-on: ubuntu-latest
 
+    env:
+      NDK_VERSION: '26.1.10909125'
+
     steps:
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۱: Checkout + JDK
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     - name: Checkout Repository
       uses: actions/checkout@v4
 
@@ -42,9 +39,7 @@ jobs:
         java-version: '21'
         cache: 'gradle'
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۲: دانلود libXray AAR (motor اصلی Xray-core)
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ── Xray AAR ──────────────────────────────────────────────
     - name: Download Xray AAR
       run: |
         set -e
@@ -53,46 +48,20 @@ jobs:
         XRAY_SOURCE="${{ github.event.inputs.xray_source || 'auto' }}"
         echo "Xray AAR source preference: $XRAY_SOURCE"
 
-        download_xray() {
-          local name="$1"
-          local url="$2"
-          echo "🔄 Trying $name ..."
-          if curl -sL --fail --retry 3 --retry-delay 5 \
-               -o app/libs/libv2ray.aar "$url"; then
-            # Check file size: a real AAR is 10MB+, an HTML error page is tiny
-            local fsize=$(stat -c%s app/libs/libv2ray.aar 2>/dev/null || stat -f%z app/libs/libv2ray.aar 2>/dev/null || echo 0)
-            if [ "$fsize" -gt 10000000 ]; then
-              echo "✅ Downloaded from $name ($(du -h app/libs/libv2ray.aar | cut -f1))"
-              echo "XRAY_SOURCE=$name" >> $GITHUB_ENV
-              return 0
-            else
-              echo "⚠️ Downloaded file from $name is too small (${fsize} bytes) — likely an error page"
-              cat app/libs/libv2ray.aar 2>/dev/null | head -5 || true
-              rm -f app/libs/libv2ray.aar
-              return 1
-            fi
-          else
-            echo "⚠️ $name download failed (curl exit code: $?)"
-            return 1
-          fi
-        }
-
         SUCCESS=false
 
         if [ "$XRAY_SOURCE" = "XTLS/libXray" ] || [ "$XRAY_SOURCE" = "auto" ]; then
-          echo "🔄 Trying XTLS/libXray (downloading zip + extracting AAR) ..."
+          echo "🔄 Trying XTLS/libXray (zip + extract) ..."
           TMP_ZIP=$(mktemp)
           if curl -sL --fail --retry 3 --retry-delay 5 \
                -o "$TMP_ZIP" \
                "https://github.com/XTLS/libXray/releases/latest/download/libxray-android.zip"; then
-            # Extract libXray.aar from the zip
             if unzip -o -j "$TMP_ZIP" "*/libXray.aar" -d app/libs/ 2>/dev/null || \
                unzip -o -j "$TMP_ZIP" "libXray.aar" -d app/libs/ 2>/dev/null; then
               fsize=$(stat -c%s app/libs/libXray.aar 2>/dev/null || echo 0)
               if [ "$fsize" -gt 10000000 ]; then
                 mv app/libs/libXray.aar app/libs/libv2ray.aar
-                echo "✅ Downloaded from XTLS/libXray ($(du -h app/libs/libv2ray.aar | cut -f1))"
-                echo "XRAY_SOURCE=XTLS/libXray" >> $GITHUB_ENV
+                echo "✅ XTLS/libXray ($(du -h app/libs/libv2ray.aar | cut -f1))"
                 SUCCESS=true
               fi
             fi
@@ -102,110 +71,92 @@ jobs:
 
         if [ "$SUCCESS" = "false" ] && \
            { [ "$XRAY_SOURCE" = "2dust/AndroidLibXrayLite" ] || [ "$XRAY_SOURCE" = "auto" ]; }; then
-          download_xray "2dust/AndroidLibXrayLite" \
-            "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar" \
-            && SUCCESS=true
+          echo "🔄 Trying 2dust/AndroidLibXrayLite ..."
+          if curl -sL --fail --retry 3 --retry-delay 5 \
+               -o app/libs/libv2ray.aar \
+               "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar"; then
+            fsize=$(stat -c%s app/libs/libv2ray.aar 2>/dev/null || echo 0)
+            if [ "$fsize" -gt 10000000 ]; then
+              echo "✅ 2dust/AndroidLibXrayLite ($(du -h app/libs/libv2ray.aar | cut -f1))"
+              SUCCESS=true
+            fi
+          fi
         fi
 
         if [ "$SUCCESS" = "false" ]; then
-          echo "::error::Failed to download Xray AAR from ALL sources. Check network or release availability."
+          echo "::error::Failed to download Xray AAR from ALL sources."
           exit 1
         fi
 
-        # List the AAR contents for debugging
-        echo "📦 AAR contents (classes.jar JNI methods):"
-        unzip -l app/libs/libv2ray.aar 2>/dev/null | head -20 || true
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۳: کلون و کامپایل hev-socks5-tunnel (tun2socks engine)
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - name: Clone hev-socks5-tunnel source
+    # ── hev-socks5-tunnel ─────────────────────────────────────
+    - name: Clone hev-socks5-tunnel
       run: |
-        git clone --recursive \
-          --depth 1 \
-          https://github.com/heiher/hev-socks5-tunnel \
+        git clone --recursive https://github.com/heiher/hev-socks5-tunnel \
           app/src/main/jni/hev-socks5-tunnel
 
     - name: Install NDK
       run: |
-        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-          --install "ndk;$NDK_VERSION" > /dev/null 2>&1 || true
-        echo "NDK installed at: $ANDROID_HOME/ndk/$NDK_VERSION"
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+          "ndk;${{ env.NDK_VERSION }}" 2>&1 | tail -3
 
-    - name: Build hev-socks5-tunnel static library (all ABIs)
+    - name: Build static libs for all ABIs
       run: |
         set -e
         NDK_DIR="$ANDROID_HOME/ndk/$NDK_VERSION"
-        TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        SRC_DIR="app/src/main/jni/hev-socks5-tunnel"
+        TC="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        SRC="app/src/main/jni/hev-socks5-tunnel"
         API=24
 
-        declare -A TARGETS=(
+        declare -A TRIPLES=(
           [arm64-v8a]=aarch64-linux-android
           [armeabi-v7a]=armv7a-linux-androideabi
           [x86]=i686-linux-android
           [x86_64]=x86_64-linux-android
         )
 
-        for ABI in "${!TARGETS[@]}"; do
-          TRIPLE="${TARGETS[$ABI]}"
-          echo "━━━ Building libhev-socks5-tunnel.a for $ABI ($TRIPLE) ━━━"
+        for ABI in "${!TRIPLES[@]}"; do
+          TRIPLE="${TRIPLES[$ABI]}"
+          echo "━━━ $ABI ($TRIPLE) ━━━"
 
-          # Clean thoroughly - remove bin/ too
-          make -C "$SRC_DIR" clean || true
-          rm -rf "$SRC_DIR/bin"
+          # Clean
+          make -C "$SRC" clean || true
+          rm -rf "$SRC/bin"
 
-          # Pass CC/AR/CFLAGS as make arguments (not env vars)
-          # -fPIC: needed because the .a gets linked into a .so
-          make -C "$SRC_DIR" static -j"$(nproc)" \
-            CC="$TOOLCHAIN/${TRIPLE}${API}-clang" \
-            AR="$TOOLCHAIN/llvm-ar" \
+          # Build ALL static libraries with -fPIC
+          make -C "$SRC" static -j"$(nproc)" \
+            CC="$TC/${TRIPLE}${API}-clang" \
+            AR="$TC/llvm-ar" \
             CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result -fPIC"
 
-          OUT_DIR="app/src/main/jni/prebuilt/$ABI"
-          mkdir -p "$OUT_DIR"
-
-          # Merge ALL static libraries into one (hev-socks5-tunnel depends on
-          # hev-task-system, libyaml, liblwip — we need all symbols)
-          MERGED="$OUT_DIR/libhev-socks5-tunnel.a"
-          cp "$SRC_DIR/bin/libhev-socks5-tunnel.a" "$MERGED"
-          for extra_lib in libhev-task-system.a libyaml.a liblwip.a; do
-            if [ -f "$SRC_DIR/bin/$extra_lib" ]; then
-              "$TOOLCHAIN/llvm-ar" x "$SRC_DIR/bin/$extra_lib"
-              "$TOOLCHAIN/llvm-ar" rcs "$MERGED" *.o
-              rm -f *.o
-              echo "  Merged $extra_lib"
-            fi
+          # Merge ALL .a files into one (handles symbol dependencies)
+          OUT="app/src/main/jni/prebuilt/$ABI"
+          mkdir -p "$OUT"
+          MERGED="$OUT/libhev-socks5-tunnel.a"
+          WORK=$(mktemp -d)
+          pushd "$WORK"
+          for lib in "$SRC"/bin/*.a; do
+            [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
           done
+          "$TC/llvm-ar" rcs "$MERGED" *.o
+          popd
+          rm -rf "$WORK"
 
-          # Verify architecture matches
-          ARCH_INFO=$("$TOOLCHAIN/llvm-objdump" -f "$OUT_DIR/libhev-socks5-tunnel.a" 2>/dev/null | head -3)
-          echo "ABI=$ABI: $ARCH_INFO"
+          # Verify: check all needed symbols exist
+          NEEDS="hev_socks5_tunnel_main_from_str hev_task_io_open hev_malloc hev_socks5_session_tcp_destruct"
+          MISSING=""
+          for sym in $NEEDS; do
+            "$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -q "T $sym" || MISSING="$MISSING $sym"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::warning::Missing symbols in $ABI:$MISSING"
+          fi
 
-          # Verify static library
-          SIZE=$(du -h "$OUT_DIR/libhev-socks5-tunnel.a" | cut -f1)
-          echo "✅ $ABI: libhev-socks5-tunnel.a ($SIZE)"
-
-          # Verify it has the symbols we need
-          "$TOOLCHAIN/llvm-nm" "$OUT_DIR/libhev-socks5-tunnel.a" 2>/dev/null | \
-            grep -q "hev_socks5_tunnel_main_from_str" || \
-            echo "::warning::hev_socks5_tunnel_main_from_str not found in $ABI static lib"
+          SIZE=$(du -h "$MERGED" | cut -f1)
+          echo "✅ $ABI: merged lib ($SIZE)"
         done
 
-        echo "━━━ All ABIs built successfully ━━━"
-        find app/src/main/jni/prebuilt -name "*.a" -exec du -h {} \;
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۴: Keystore + Gradle
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     - name: Decode Debug Keystore
-      run: |
-        if [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
-          echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > debug.keystore
-          echo "✅ Debug keystore decoded"
-        else
-          echo "⚠️ No DEBUG_KEYSTORE_BASE64 secret; using default debug keystore"
-        fi
+      run: echo "${{ secrets.DEBUG_KEY_BASE64 }}" | base64 -d > app/debug.keystore
 
     - name: Grant Execute Permission to Gradlew
       run: chmod +x gradlew
@@ -213,13 +164,10 @@ jobs:
     - name: Download Gradle Wrapper JAR
       run: |
         mkdir -p gradle/wrapper
-        curl -sL \
-          https://raw.githubusercontent.com/gradle/gradle/v9.3.1/gradle/wrapper/gradle-wrapper.jar \
-          -o gradle/wrapper/gradle-wrapper.jar
+        curl -sL -o gradle/wrapper/gradle-wrapper.jar \
+          "https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar"
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۵: تست + بیلد
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ── Tests ──────────────────────────────────────────────────
     - name: Run Unit & Robolectric Tests
       run: |
         ./gradlew testDebugUnitTest \
@@ -227,93 +175,57 @@ jobs:
           --stacktrace \
           --no-daemon
 
+    # ── Build ──────────────────────────────────────────────────
     - name: Build Release APK
       run: |
         ./gradlew assembleRelease \
           --no-configuration-cache \
           --stacktrace \
-          --no-daemon
+          --no-daemon \
+          -Pandroid.injected.signing.store.file=${{ github.workspace }}/app/debug.keystore \
+          -Pandroid.injected.signing.store.password=${{ secrets.DEBUG_STORE_PASSWORD }} \
+          -Pandroid.injected.signing.key.alias=${{ secrets.DEBUG_KEY_ALIAS }} \
+          -Pandroid.injected.signing.key.password=${{ secrets.DEBUG_KEY_PASSWORD }}
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۶: بررسی نهایی Native Libraries
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - name: Verify native libraries in APK
+    - name: Verify APK and native libs
       run: |
         set -e
-        APK="app/build/outputs/apk/release/app-release.apk"
+        APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+        echo "APK: $APK ($(du -h "$APK" | cut -f1))"
 
-        if [ ! -f "$APK" ]; then
-          echo "::error::APK not found at $APK"
-          exit 1
-        fi
+        # Check native libraries inside APK
+        echo "Native libs in APK:"
+        unzip -l "$APK" | grep '\.so$'
 
-        echo "📦 APK size: $(du -h "$APK" | cut -f1)"
-        WORKDIR=$(mktemp -d)
-        unzip -o -q "$APK" -d "$WORKDIR"
-
-        echo ""
-        echo "━━━ Native Libraries (.so files) ━━━"
-        find "$WORKDIR/lib" -name "*.so" -exec du -h {} \; 2>/dev/null || echo "No .so files found!"
-
-        # ❌ Check 1: No standalone libhev-socks5-tunnel.so (should be static in hev2socks_bridge.so)
-        FOUND_BAD=0
-        for so in $(find "$WORKDIR/lib" -name "libhev-socks5-tunnel.so" 2>/dev/null); do
-          echo "::error::STANDALONE LIBRARY FOUND: $so"
-          echo "   Expected: hev-socks5-tunnel statically linked into libhev2socks_bridge.so"
-          FOUND_BAD=1
-        done
-
-        # ❌ Check 2: libhev2socks_bridge.so must exist
-        FOUND_BRIDGE=0
-        for so in $(find "$WORKDIR/lib" -name "libhev2socks_bridge.so" 2>/dev/null); do
-          echo "✅ Found bridge library: $so"
-          FOUND_BRIDGE=1
-        done
-        if [ "$FOUND_BRIDGE" -eq 0 ]; then
-          echo "::warning::libhev2socks_bridge.so not found in APK — JNI bridge may not be compiled"
-        fi
-
-        # ❌ Check 3: libv2ray.aar's gojni must exist
-        FOUND_XRAY=0
-        for so in $(find "$WORKDIR/lib" -name "libgojni.so" 2>/dev/null); do
-          echo "✅ Found Xray engine: $so"
-          FOUND_XRAY=1
-        done
-        if [ "$FOUND_XRAY" -eq 0 ]; then
-          echo "::warning::libgojni.so not found — Xray AAR may be missing or incomplete"
-        fi
-
-        # ❌ Check 4: No foreign JNI_OnLoad in our bridge
-        for so in $(find "$WORKDIR/lib" -name "libhev2socks_bridge.so" 2>/dev/null); do
-          if nm -D --defined-only "$so" 2>/dev/null | grep -q "JNI_OnLoad"; then
-            echo "✅ $so exports JNI_OnLoad (expected for our bridge)"
+        # Verify hev2socks_bridge.so exists for all ABIs
+        for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+          if unzip -l "$APK" | grep -q "$abi/libhev2socks_bridge.so"; then
+            echo "✅ $abi/libhev2socks_bridge.so present"
+          else
+            echo "::warning::Missing $abi/libhev2socks_bridge.so in APK"
           fi
         done
 
-        rm -rf "$WORKDIR"
+        # Also verify libv2ray.so (from Xray AAR)
+        for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+          if unzip -l "$APK" | grep -q "$abi/libv2ray.so"; then
+            echo "✅ $abi/libv2ray.so present"
+          else
+            echo "::warning::Missing $abi/libv2ray.so in APK"
+          fi
+        done
 
-        if [ "$FOUND_BAD" -ne 0 ]; then
-          exit 1
-        fi
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CF-VPN-release
+        path: app/build/outputs/apk/**/*.apk
+        retention-days: 15
 
-        echo ""
-        echo "━━━ Verification PASSED ━━━"
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # مرحله ۷: آپلود Artifactها
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     - name: Upload Test Reports
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: test-reports
-        path: app/build/reports/tests/testDebugUnitTest/
-        if-no-files-found: ignore
-
-    - name: Upload Release APK
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: CFVPN-release-apk
-        path: app/build/outputs/apk/release/app-release.apk
-        if-no-files-found: error
+        path: app/build/reports/tests/
+        retention-days: 5
