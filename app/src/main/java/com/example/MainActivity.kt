@@ -491,7 +491,7 @@ fun ConfigScreen(
                             Toast.makeText(context, "All configs deleted", Toast.LENGTH_SHORT).show()
                         }
                     )
-                    Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f))
                     DropdownMenuItem(
                         text = { Text("Bug Report") },
                         leadingIcon = { Icon(Icons.Default.BugReport, contentDescription = null) },
@@ -751,7 +751,7 @@ fun ConfigScreen(
 
                     // VLESS specific configuration
                     if (type == "vless") {
-                        Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                         Text(
                             text = "VLESS Protocol Settings",
                             fontWeight = FontWeight.Bold,
@@ -874,7 +874,7 @@ fun ConfigScreen(
                     }
 
                     // Fragment Settings Section
-                    Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1718,7 +1718,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Open app proxy settings Item
                         Row(
@@ -1738,7 +1738,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Logcat Item
                         Row(
@@ -1758,7 +1758,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Boot auto start
                         Row(
@@ -1782,7 +1782,7 @@ fun SettingsScreen(
                             )
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Hide from recent tasks
                         Row(
@@ -1806,7 +1806,7 @@ fun SettingsScreen(
                             )
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Live update notification
                         Row(
@@ -1883,7 +1883,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Socks port Item
                         Row(
@@ -1907,7 +1907,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Socks Username Item
                         Row(
@@ -1931,7 +1931,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Socks Password Item
                         Row(
@@ -1955,7 +1955,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // DNS IPv4 Item
                         Row(
@@ -1979,7 +1979,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Enable IPv6 Item
                         Row(
@@ -2003,7 +2003,7 @@ fun SettingsScreen(
                             )
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // DNS IPv6 Item
                         Row(
@@ -2027,7 +2027,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Route settings Item
                         Row(
@@ -2056,7 +2056,7 @@ fun SettingsScreen(
                             )
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // geoip Item
                         Row(
@@ -2124,7 +2124,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // geosite Item
                         Row(
@@ -2192,7 +2192,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Geo_ip_lite Item
                         Row(
@@ -2241,7 +2241,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Enable hex tun Item
                         Row(
@@ -2265,7 +2265,7 @@ fun SettingsScreen(
                             )
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Test URL Item
                         Row(
@@ -2289,7 +2289,7 @@ fun SettingsScreen(
                             }
                         }
 
-                        Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f))
 
                         // Socks Tunnel Engine Item
                         Row(

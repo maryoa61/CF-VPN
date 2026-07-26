@@ -1,123 +1,98 @@
 package com.example.vpn
 
+import android.system.Os
+import android.util.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Thin Kotlin wrapper around the native hev-socks5-tunnel library
- * (https://github.com/heiher/hev-socks5-tunnel).
- *
- * WHY THIS EXISTS:
- * Xray-core has no "tun" inbound — it only understands socks/http/vmess/
- * vless/trojan/shadowsocks/dokodemo-door. This library is the layer that
- * actually terminates the raw TUN file descriptor handed out by
- * VpnService.Builder.establish(), and forwards the IP packets into a plain
- * SOCKS5 endpoint — in our case Xray's own "socks-in" inbound on
- * 127.0.0.1:$SOCKS_INBOUND_PORT (see XrayConfigGenerator).
- *
- * REQUIRES: libhev2socks_bridge.so present under
- * src/main/jniLibs/<abi>/ for every ABI you ship (arm64-v8a at minimum).
- * This .so is built by the Android.mk in jni/ which links the prebuilt
- * libhev-socks5-tunnel.a with hev_bridge.c (JNI wrapper).
+ * Kotlin wrapper around the native hev-socks5-tunnel library.
+ * Loads libhev2socks_bridge.so (built from hev_bridge.c + libhev-socks5-tunnel.a).
  */
 object HevSocks5Tunnel {
-
-    private val isRunning = AtomicBoolean(false)
-    private val stopRequested = AtomicBoolean(false)
-
-    @Volatile
-    private var libraryLoaded = false
-
-    private var libraryLoadError: Throwable? = null
+    private const val TAG = "HevSocks5Tunnel"
+    private const val LIB_NAME = "hev2socks_bridge"
+    private val loaded = AtomicBoolean(false)
 
     init {
         try {
-            // IMPORTANT: This must match the LOCAL_MODULE name in Android.mk.
-            // Android.mk builds "hev2socks_bridge" → libhev2socks_bridge.so
-            System.loadLibrary("hev2socks_bridge")
-            libraryLoaded = true
+            System.loadLibrary(LIB_NAME)
+            loaded.set(true)
+            Log.i(TAG, "Native library loaded: $LIB_NAME")
         } catch (e: UnsatisfiedLinkError) {
-            // Most likely cause: libhev2socks_bridge.so isn't present under
-            // jniLibs/<abi>/ for this ABI — e.g. the Gradle NDK build hasn't
-            // run, or ran for the wrong ABI.
-            libraryLoadError = e
+            Log.e(TAG, "Failed to load native library: $LIB_NAME", e)
         }
     }
 
-    /**
-     * Blocking call — runs the tunnel's event loop on the calling thread
-     * until [stop] is invoked or the tunnel exits on its own (e.g. TUN fd
-     * closed). MUST be launched on a dedicated Thread, never on a shared
-     * coroutine dispatcher, or it will starve every other coroutine on
-     * that dispatcher for the lifetime of the VPN session.
-     *
-     * @return the native exit code (0 on clean shutdown via [stop]).
-     */
-    private external fun nativeMainFromFile(configPath: String, tunFd: Int): Int
-
-    /** Signals the running tunnel loop to shut down. Safe from any thread. */
+    // ── JNI native methods (implemented in hev_bridge.c) ──
+    private external fun nativeMainFromFile(configStr: String, tunFd: Int): Int
     private external fun nativeQuit()
+    private external fun nativeStats(): LongArray
 
     /**
-     * Starts the tunnel and blocks until it stops. Call this from a
-     * dedicated Thread (see XrayVpnService), not from a coroutine.
+     * Write hev-socks5-tunnel YAML config file.
+     * Called by XrayVpnService before starting the tunnel.
      */
-    fun start(configPath: String, tunFd: Int): Int {
-        if (!libraryLoaded) {
-            throw IllegalStateException(
-                "libhev2socks_bridge.so failed to load (${libraryLoadError?.message}). " +
-                "Ensure the NDK build ran successfully and the .so is bundled " +
-                "under jniLibs/<abi>/ for this device's ABI.",
-                libraryLoadError
-            )
-        }
-        stopRequested.set(false)
-        isRunning.set(true)
-        return try {
-            nativeMainFromFile(configPath, tunFd)
-        } finally {
-            isRunning.set(false)
-        }
+    fun writeConfig(destFile: File, mtu: Int, socksPort: Int) {
+        val config = """
+            |main:
+            |  tun-fd: -1
+            |  mtu: $mtu
+            |  log-level: info
+            |  socks5-server: 127.0.0.1:$socksPort
+        """.trimMargin()
+        destFile.writeText(config)
+        Log.i(TAG, "Config written to ${destFile.absolutePath} (mtu=$mtu, socks=$socksPort)")
     }
 
     /**
-     * Requests a clean shutdown of the tunnel loop, if one is running.
-     * Safe to call multiple times and/or concurrently from multiple
-     * threads/coroutines — only the first call in a given session actually
-     * reaches the native layer; every other call becomes a no-op.
+     * Start the tunnel event loop on a background thread.
+     * Reads the config from [configPath], then passes it to the native layer.
+     */
+    fun start(configPath: String, tunFd: Int) {
+        if (!loaded.get()) {
+            Log.e(TAG, "Cannot start: native library not loaded")
+            return
+        }
+        Thread({
+            try {
+                val configFile = File(configPath)
+                val configStr = configFile.readText()
+                // Set tun fd on the file descriptor via os.android
+                Os.dup2(tunFd, 4) // TUN fd → fd 4 (hev-socks5-tunnel expects this)
+                Log.i(TAG, "Starting tunnel with config=$configPath, tunFd=$tunFd")
+                val result = nativeMainFromFile(configStr, 4)
+                Log.i(TAG, "Tunnel exited with code: $result")
+            } catch (e: Exception) {
+                Log.e(TAG, "Tunnel start failed", e)
+            }
+        }, "hev-socks5-tunnel").start()
+    }
+
+    /**
+     * Signal the tunnel to shut down.
      */
     fun stop() {
-        if (isRunning.get() && stopRequested.compareAndSet(false, true)) {
+        if (!loaded.get()) return
+        try {
             nativeQuit()
+            Log.i(TAG, "Tunnel quit signaled")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to quit tunnel", e)
         }
     }
 
-    fun isActive(): Boolean = isRunning.get()
-
     /**
-     * Writes the YAML config hev-socks5-tunnel expects. This is a separate
-     * file from xray_config.json — the two processes/threads don't share
-     * a config format.
+     * Get tunnel traffic statistics.
+     * Returns [txPackets, txBytes, rxPackets, rxBytes].
      */
-    fun writeConfig(
-        destFile: File,
-        socksPort: Int,
-        mtu: Int = 1400
-    ): File {
-        destFile.writeText(
-            """
-            tunnel:
-              name: tun0
-              mtu: $mtu
-              multi-queue: false
-            socks5:
-              address: 127.0.0.1
-              port: $socksPort
-              udp: 'udp'
-            misc:
-              task-stack-size: 20480
-            """.trimIndent()
-        )
-        return destFile
+    fun stats(): LongArray {
+        if (!loaded.get()) return longArrayOf(0, 0, 0, 0)
+        return try {
+            nativeStats()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get stats", e)
+            longArrayOf(0, 0, 0, 0)
+        }
     }
 }
