@@ -105,15 +105,15 @@ jobs:
           mkdir -p "$OUT"
           MERGED="$OUT/libhev-socks5-tunnel.a"
 
-          # Merge available static libs using ar script mode
-          AR_SCRIPT=/tmp/ar_merge.txt
-          echo "CREATE $MERGED" > "$AR_SCRIPT"
+          # Merge available static libs by concatenation
+          MERGED="$OUT/libhev-socks5-tunnel.a"
+          > "$MERGED"
           for lib in libhev-socks5-tunnel.a libhev-task-system.a libyaml.a liblwip.a; do
-            [ -f "$SRC/bin/$lib" ] && echo "ADDLIB $SRC/bin/$lib" >> "$AR_SCRIPT"
+            if [ -f "$SRC/bin/$lib" ]; then
+              cat "$SRC/bin/$lib" >> "$MERGED"
+              echo "  + $lib"
+            fi
           done
-          echo "SAVE" >> "$AR_SCRIPT"
-          echo "END" >> "$AR_SCRIPT"
-          "$TC/llvm-ar" -M < "$AR_SCRIPT"
 
           SIZE=$(du -h "$MERGED" | cut -f1)
           SYM=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -c "T " || true)
