@@ -152,7 +152,7 @@ class MainActivity : ComponentActivity() {
     private fun stopVpnServiceInternal() {
         try {
             val intent = Intent(this, XrayVpnService::class.java).apply {
-                action = "STOP"
+                action = XrayVpnService.ACTION_STOP
             }
             startService(intent)
             viewModel.toggleConnection()
