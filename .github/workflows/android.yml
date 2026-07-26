@@ -61,6 +61,22 @@ jobs:
     - name: Clone hev-socks5-tunnel
       run: git clone --recursive --depth 1 https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
 
+    - name: Install NDK
+      run: |
+        if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+          echo "Installing NDK $NDK_VERSION..."
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "ndk;$NDK_VERSION" 2>&1 | tail -5
+        fi
+        NDK_CLANG="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+        if [ -x "$NDK_CLANG" ]; then
+          echo "✅ NDK $NDK_VERSION ready"
+        else
+          echo "::error::NDK clang not found at $NDK_CLANG"
+          ls "$ANDROID_HOME/ndk/" 2>/dev/null || echo "No NDKs installed"
+          exit 1
+        fi
+
     - name: Build static libs (all ABIs)
       run: |
         set -e
