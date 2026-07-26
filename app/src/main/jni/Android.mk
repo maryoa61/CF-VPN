@@ -8,7 +8,7 @@ LOCAL_SRC_FILES := prebuilt/$(TARGET_ARCH_ABI)/libhev-socks5-tunnel.a
 include $(PREBUILT_STATIC_LIBRARY)
 
 include $(CLEAR_VARS)
-LOCAL_MODULE := hev-socks-bridge
+LOCAL_MODULE := hev2socks_bridge
 LOCAL_SRC_FILES := hev_bridge.c
 LOCAL_STATIC_LIBRARIES := hev-socks5-tunnel-static
 LOCAL_LDLIBS := -llog

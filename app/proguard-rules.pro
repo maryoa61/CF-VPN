@@ -1,21 +1,46 @@
 # Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Room
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Entity class *
+-dontwarn androidx.room.paging.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Moshi
+-keep class com.squareup.moshi.** { *; }
+-keep class com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory { *; }
+-keep @com.squareup.moshi.JsonClass class * { *; }
+-keepclassmembers class * {
+    @com.squareup.moshi.Json <fields>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# VPN data classes
+-keep class com.example.data.VpnConfig { *; }
+-keep class com.example.data.VpnConfigDao { *; }
+-keep class com.example.data.VpnDatabase { *; }
+
+# Xray/V2Ray JNI reflection
+-keep class io.coreny.v2ray.Libv2ray { *; }
+-keep class io.coreny.Libv2ray { *; }
+-keep class xray.lib.Xray { *; }
+-keep class xray.lib.Libv2ray { *; }
+
+# Kotlin Coroutines
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
+-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+-keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
+
+# Retrofit / OkHttp
+-dontwarn okhttp3.**
+-dontwarn retrofit2.**
+-keep class okhttp3.** { *; }
+-keep class retrofit2.** { *; }
+
+# Firebase
+-keep class com.google.firebase.** { *; }
+-dontwarn com.google.firebase.**
+
+# General
+-keepattributes Signature
+-keepattributes *Annotation*
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

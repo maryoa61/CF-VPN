@@ -1,8 +1,0 @@
-# Treat binary files as binary to prevent corruption by line ending conversions
-*.jar binary
-*.so binary
-*.png binary
-*.webp binary
-*.jpg binary
-*.jpeg binary
-*.gif binary

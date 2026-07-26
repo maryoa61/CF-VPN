@@ -94,7 +94,12 @@ googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.W
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
-  implementation(files("libs/libv2ray.aar"))
+  // Xray-core JNI wrapper (download from https://github.com/XTLS/libXray/releases)
+  if (file("libs/libv2ray.aar").exists()) {
+    implementation(files("libs/libv2ray.aar"))
+  } else {
+    logger.warn("WARNING: libs/libv2ray.aar not found")
+  }
 
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
