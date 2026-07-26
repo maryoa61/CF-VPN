@@ -160,7 +160,8 @@ jobs:
 
           OUT_DIR="app/src/main/jni/prebuilt/$ABI"
           mkdir -p "$OUT_DIR"
-          cp "$SRC_DIR/libhev-socks5-tunnel.a" "$OUT_DIR/"
+          # The Makefile outputs to bin/ subdirectory
+          cp "$SRC_DIR/bin/libhev-socks5-tunnel.a" "$OUT_DIR/"
 
           # Verify static library
           SIZE=$(du -h "$OUT_DIR/libhev-socks5-tunnel.a" | cut -f1)
