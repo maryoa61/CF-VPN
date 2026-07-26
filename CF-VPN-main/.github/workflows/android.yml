@@ -59,19 +59,20 @@ jobs:
           echo "🔄 Trying $name ..."
           if curl -sL --fail --retry 3 --retry-delay 5 \
                -o app/libs/libv2ray.aar "$url"; then
-            # Verify it's actually a valid ZIP/AAR (not an HTML error page)
-            if file app/libs/libv2ray.aar | grep -q "Zip\|Java archive"; then
-              echo "✅ Downloaded from $name"
-              echo "   Size: $(du -h app/libs/libv2ray.aar | cut -f1)"
+            # Check file size: a real AAR is 10MB+, an HTML error page is tiny
+            local fsize=$(stat -c%s app/libs/libv2ray.aar 2>/dev/null || stat -f%z app/libs/libv2ray.aar 2>/dev/null || echo 0)
+            if [ "$fsize" -gt 10000000 ]; then
+              echo "✅ Downloaded from $name ($(du -h app/libs/libv2ray.aar | cut -f1))"
               echo "XRAY_SOURCE=$name" >> $GITHUB_ENV
               return 0
             else
-              echo "⚠️ Downloaded file from $name is not a valid AAR (HTML error page?)"
+              echo "⚠️ Downloaded file from $name is too small (${fsize} bytes) — likely an error page"
+              cat app/libs/libv2ray.aar 2>/dev/null | head -5 || true
               rm -f app/libs/libv2ray.aar
               return 1
             fi
           else
-            echo "⚠️ $name download failed"
+            echo "⚠️ $name download failed (curl exit code: $?)"
             return 1
           fi
         }
@@ -79,9 +80,24 @@ jobs:
         SUCCESS=false
 
         if [ "$XRAY_SOURCE" = "XTLS/libXray" ] || [ "$XRAY_SOURCE" = "auto" ]; then
-          download_xray "XTLS/libXray" \
-            "https://github.com/XTLS/libXray/releases/latest/download/libXray.aar" \
-            && SUCCESS=true
+          echo "🔄 Trying XTLS/libXray (downloading zip + extracting AAR) ..."
+          TMP_ZIP=$(mktemp)
+          if curl -sL --fail --retry 3 --retry-delay 5 \
+               -o "$TMP_ZIP" \
+               "https://github.com/XTLS/libXray/releases/latest/download/libxray-android.zip"; then
+            # Extract libXray.aar from the zip
+            if unzip -o -j "$TMP_ZIP" "*/libXray.aar" -d app/libs/ 2>/dev/null || \
+               unzip -o -j "$TMP_ZIP" "libXray.aar" -d app/libs/ 2>/dev/null; then
+              fsize=$(stat -c%s app/libs/libXray.aar 2>/dev/null || echo 0)
+              if [ "$fsize" -gt 10000000 ]; then
+                mv app/libs/libXray.aar app/libs/libv2ray.aar
+                echo "✅ Downloaded from XTLS/libXray ($(du -h app/libs/libv2ray.aar | cut -f1))"
+                echo "XRAY_SOURCE=XTLS/libXray" >> $GITHUB_ENV
+                SUCCESS=true
+              fi
+            fi
+            rm -f "$TMP_ZIP"
+          fi
         fi
 
         if [ "$SUCCESS" = "false" ] && \
