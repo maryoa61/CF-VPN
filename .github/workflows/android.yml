@@ -137,7 +137,8 @@ jobs:
           for lib in "$SRC"/bin/*.a; do
             [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
           done
-          "$TC/llvm-ar" rcs "$MERGED" *.o
+          # .o files may be in subdirs (src/core/src/*.o etc) — find them all
+          find . -name '*.o' -print0 | xargs -0 "$TC/llvm-ar" rcs "$MERGED"
           popd
           rm -rf "$WORK"
 
