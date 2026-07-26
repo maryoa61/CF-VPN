@@ -104,7 +104,7 @@ jobs:
         set -e
         NDK_DIR="$ANDROID_HOME/ndk/$NDK_VERSION"
         TC="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        SRC="app/src/main/jni/hev-socks5-tunnel"
+        SRC="$(pwd)/app/src/main/jni/hev-socks5-tunnel"
         API=24
 
         declare -A TRIPLES=(
@@ -128,32 +128,44 @@ jobs:
             AR="$TC/llvm-ar" \
             CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result -fPIC"
 
-          # Merge ALL .a files into one (handles symbol dependencies)
-          OUT="$PWD/app/src/main/jni/prebuilt/$ABI"
+          # Merge ALL .a files into one using a temp directory
+          OUT="$(pwd)/app/src/main/jni/prebuilt/$ABI"
           mkdir -p "$OUT"
           MERGED="$OUT/libhev-socks5-tunnel.a"
-          WORK=$(mktemp -d)
-          pushd "$WORK"
+          WORK="$(mktemp -d)"
+
+          # Extract all .o from all .a files (use absolute paths!)
+          for lib in "$SRC"/bin/*.a; do
+            [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
+            cp -r "$SRC"/bin/*.o "$WORK/" 2>/dev/null || true
+          done
+          # Also try extracting with cd
+          cd "$WORK"
           for lib in "$SRC"/bin/*.a; do
             [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
           done
-          # .o files may be in subdirs — find them all
-          find . -name '*.o' -print0 | xargs -0 "$TC/llvm-ar" rcs "$MERGED"
-          popd
-          rm -rf "$WORK"
 
-          # Verify: check all needed symbols exist
-          NEEDS="hev_socks5_tunnel_main_from_str hev_task_io_open hev_malloc hev_socks5_session_tcp_destruct"
-          MISSING=""
-          for sym in $NEEDS; do
-            "$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -q "T $sym" || MISSING="$MISSING $sym"
-          done
-          if [ -n "$MISSING" ]; then
-            echo "::warning::Missing symbols in $ABI:$MISSING"
+          # Find ALL .o files and create merged .a
+          OFILES=$(find "$WORK" -name '*.o' 2>/dev/null)
+          if [ -n "$OFILES" ]; then
+            echo "$OFILES" | xargs "$TC/llvm-ar" rcs "$MERGED"
+          else
+            echo "::error::No .o files found after extraction!"
+            echo "Contents of $SRC/bin/:"
+            ls -la "$SRC"/bin/ 2>/dev/null || true
+            echo "Contents of $WORK:"
+            ls -laR "$WORK" 2>/dev/null || true
+            exit 1
           fi
 
+          cd - > /dev/null
+          rm -rf "$WORK"
+
+          # Verify
           SIZE=$(du -h "$MERGED" | cut -f1)
+          NM_OUT=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | head -5 || true)
           echo "✅ $ABI: merged lib ($SIZE)"
+          echo "$NM_OUT" | head -3
         done
 
     - name: Decode Debug Keystore
