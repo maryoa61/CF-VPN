@@ -128,44 +128,32 @@ jobs:
             AR="$TC/llvm-ar" \
             CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result -fPIC"
 
-          # Merge ALL .a files into one using a temp directory
+          # Merge ALL .a into one using ar script mode
           OUT="$(pwd)/app/src/main/jni/prebuilt/$ABI"
           mkdir -p "$OUT"
           MERGED="$OUT/libhev-socks5-tunnel.a"
-          WORK="$(mktemp -d)"
-
-          # Extract all .o from all .a files (use absolute paths!)
-          for lib in "$SRC"/bin/*.a; do
-            [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
-            cp -r "$SRC"/bin/*.o "$WORK/" 2>/dev/null || true
-          done
-          # Also try extracting with cd
-          cd "$WORK"
-          for lib in "$SRC"/bin/*.a; do
-            [ -f "$lib" ] && "$TC/llvm-ar" x "$lib"
-          done
-
-          # Find ALL .o files and create merged .a
-          OFILES=$(find "$WORK" -name '*.o' 2>/dev/null)
-          if [ -n "$OFILES" ]; then
-            echo "$OFILES" | xargs "$TC/llvm-ar" rcs "$MERGED"
-          else
-            echo "::error::No .o files found after extraction!"
-            echo "Contents of $SRC/bin/:"
-            ls -la "$SRC"/bin/ 2>/dev/null || true
-            echo "Contents of $WORK:"
-            ls -laR "$WORK" 2>/dev/null || true
-            exit 1
-          fi
-
-          cd - > /dev/null
-          rm -rf "$WORK"
+          AR_SCRIPT=$(mktemp)
+          cat > "$AR_SCRIPT" <<ARLIST
+          CREATE $MERGED
+          ADDLIB $SRC/bin/libhev-socks5-tunnel.a
+          ADDLIB $SRC/bin/libhev-task-system.a
+          ADDLIB $SRC/bin/libyaml.a
+          ADDLIB $SRC/bin/liblwip.a
+          SAVE
+          END
+          ARLIST
+          "$TC/llvm-ar" -M < "$AR_SCRIPT"
+          rm -f "$AR_SCRIPT"
 
           # Verify
           SIZE=$(du -h "$MERGED" | cut -f1)
-          NM_OUT=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | head -5 || true)
-          echo "✅ $ABI: merged lib ($SIZE)"
-          echo "$NM_OUT" | head -3
+          if "$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -q "hev_socks5_tunnel_main_from_str"; then
+            echo "✅ $ABI: merged ($SIZE) — symbols OK"
+          else
+            echo "❌ $ABI: MERGE FAILED"
+            "$TC/llvm-nm" "$MERGED" 2>/dev/null | head -5
+            exit 1
+          fi
         done
 
     - name: Decode Debug Keystore
