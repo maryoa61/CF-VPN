@@ -156,15 +156,27 @@ jobs:
           rm -rf "$SRC_DIR/bin"
 
           # Pass CC/AR/CFLAGS as make arguments (not env vars)
-          # so they override Makefile defaults
+          # -fPIC: needed because the .a gets linked into a .so
           make -C "$SRC_DIR" static -j"$(nproc)" \
             CC="$TOOLCHAIN/${TRIPLE}${API}-clang" \
             AR="$TOOLCHAIN/llvm-ar" \
-            CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result"
+            CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result -fPIC"
 
           OUT_DIR="app/src/main/jni/prebuilt/$ABI"
           mkdir -p "$OUT_DIR"
-          cp "$SRC_DIR/bin/libhev-socks5-tunnel.a" "$OUT_DIR/"
+
+          # Merge ALL static libraries into one (hev-socks5-tunnel depends on
+          # hev-task-system, libyaml, liblwip — we need all symbols)
+          MERGED="$OUT_DIR/libhev-socks5-tunnel.a"
+          cp "$SRC_DIR/bin/libhev-socks5-tunnel.a" "$MERGED"
+          for extra_lib in libhev-task-system.a libyaml.a liblwip.a; do
+            if [ -f "$SRC_DIR/bin/$extra_lib" ]; then
+              "$TOOLCHAIN/llvm-ar" x "$SRC_DIR/bin/$extra_lib"
+              "$TOOLCHAIN/llvm-ar" rcs "$MERGED" *.o
+              rm -f *.o
+              echo "  Merged $extra_lib"
+            fi
+          done
 
           # Verify architecture matches
           ARCH_INFO=$("$TOOLCHAIN/llvm-objdump" -f "$OUT_DIR/libhev-socks5-tunnel.a" 2>/dev/null | head -3)
