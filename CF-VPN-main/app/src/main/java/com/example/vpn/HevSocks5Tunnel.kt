@@ -1,123 +1,160 @@
-package com.example.vpn
-
-import java.io.File
-import java.util.concurrent.atomic.AtomicBoolean
-
-/**
- * Thin Kotlin wrapper around the native hev-socks5-tunnel library
- * (https://github.com/heiher/hev-socks5-tunnel).
+/*
+ * hev_bridge.c
  *
- * WHY THIS EXISTS:
- * Xray-core has no "tun" inbound — it only understands socks/http/vmess/
- * vless/trojan/shadowsocks/dokodemo-door. This library is the layer that
- * actually terminates the raw TUN file descriptor handed out by
- * VpnService.Builder.establish(), and forwards the IP packets into a plain
- * SOCKS5 endpoint — in our case Xray's own "socks-in" inbound on
- * 127.0.0.1:$SOCKS_INBOUND_PORT (see XrayConfigGenerator).
+ * Thin JNI wrapper around heiher/hev-socks5-tunnel's public C API
+ * (hev_socks5_tunnel_main_from_str / _quit / _stats).
  *
- * REQUIRES: libhev2socks_bridge.so present under
- * src/main/jniLibs/<abi>/ for every ABI you ship (arm64-v8a at minimum).
- * This .so is built by the Android.mk in jni/ which links the prebuilt
- * libhev-socks5-tunnel.a with hev_bridge.c (JNI wrapper).
+ * This file is compiled into its own shared library (hev2socks_bridge)
+ * which statically links against the upstream libhev-socks5-tunnel.a.
+ *
+ * JNI function names MUST match the Kotlin class:
+ *   com.example.vpn.HevSocks5Tunnel
+ *   - nativeMainFromFile(String, int) → int
+ *   - nativeQuit()                   → void
+ *
+ * IMPORTANT: The native method names are derived from the fully-qualified
+ * class name. If you rename or move the Kotlin class, you MUST update
+ * these function names accordingly.
  */
-object HevSocks5Tunnel {
 
-    private val isRunning = AtomicBoolean(false)
-    private val stopRequested = AtomicBoolean(false)
+#include <jni.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 
-    @Volatile
-    private var libraryLoaded = false
+/* Public API of hev-socks5-tunnel (see include/hev-main.h upstream) */
+extern int hev_socks5_tunnel_main_from_str(const unsigned char *config_str,
+                                            unsigned int config_len,
+                                            int tun_fd);
+extern void hev_socks5_tunnel_quit(void);
+extern void hev_socks5_tunnel_stats(size_t *tx_packets, size_t *tx_bytes,
+                                     size_t *rx_packets, size_t *rx_bytes);
 
-    private var libraryLoadError: Throwable? = null
+static pthread_t g_thread;
+static volatile int g_running = 0;
 
-    init {
-        try {
-            // IMPORTANT: This must match the LOCAL_MODULE name in Android.mk.
-            // Android.mk builds "hev2socks_bridge" → libhev2socks_bridge.so
-            System.loadLibrary("hev2socks_bridge")
-            libraryLoaded = true
-        } catch (e: UnsatisfiedLinkError) {
-            // Most likely cause: libhev2socks_bridge.so isn't present under
-            // jniLibs/<abi>/ for this ABI — e.g. the Gradle NDK build hasn't
-            // run, or ran for the wrong ABI.
-            libraryLoadError = e
-        }
+typedef struct {
+    char *config;
+    int config_len;
+    int tun_fd;
+} start_args_t;
+
+static void *
+run_tunnel(void *arg)
+{
+    start_args_t *args = (start_args_t *) arg;
+    hev_socks5_tunnel_main_from_str((unsigned char *) args->config,
+                                     args->config_len, args->tun_fd);
+    free(args->config);
+    free(args);
+    g_running = 0;
+    return NULL;
+}
+
+/*
+ * JNI: com.example.vpn.HevSocks5Tunnel.nativeMainFromFile(String configPath, int tunFd)
+ *
+ * Runs the tunnel event loop on the calling thread (blocking).
+ * Called from Kotlin's HevSocks5Tunnel.start().
+ */
+JNIEXPORT jint JNICALL
+Java_com_example_vpn_HevSocks5Tunnel_nativeMainFromFile(JNIEnv *env, jobject thiz,
+                                                        jstring jConfig, jint tunFd)
+{
+    (void) thiz;
+
+    if (g_running) {
+        return -1; /* already running */
     }
 
-    /**
-     * Blocking call — runs the tunnel's event loop on the calling thread
-     * until [stop] is invoked or the tunnel exits on its own (e.g. TUN fd
-     * closed). MUST be launched on a dedicated Thread, never on a shared
-     * coroutine dispatcher, or it will starve every other coroutine on
-     * that dispatcher for the lifetime of the VPN session.
-     *
-     * @return the native exit code (0 on clean shutdown via [stop]).
-     */
-    private external fun nativeMainFromFile(configPath: String, tunFd: Int): Int
+    const char *cConfig = (*env)->GetStringUTFChars(env, jConfig, NULL);
+    if (cConfig == NULL) {
+        return -2; /* OOM or invalid string */
+    }
+    int len = (int) strlen(cConfig);
 
-    /** Signals the running tunnel loop to shut down. Safe from any thread. */
-    private external fun nativeQuit()
+    start_args_t *args = (start_args_t *) malloc(sizeof(start_args_t));
+    if (args == NULL) {
+        (*env)->ReleaseStringUTFChars(env, jConfig, cConfig);
+        return -3;
+    }
+    args->config = (char *) malloc((size_t) len + 1);
+    if (args->config == NULL) {
+        free(args);
+        (*env)->ReleaseStringUTFChars(env, jConfig, cConfig);
+        return -3;
+    }
+    memcpy(args->config, cConfig, (size_t) len + 1);
+    args->config_len = len;
+    args->tun_fd = tunFd;
 
-    /**
-     * Starts the tunnel and blocks until it stops. Call this from a
-     * dedicated Thread (see XrayVpnService), not from a coroutine.
-     */
-    fun start(configPath: String, tunFd: Int): Int {
-        if (!libraryLoaded) {
-            throw IllegalStateException(
-                "libhev2socks_bridge.so failed to load (${libraryLoadError?.message}). " +
-                "Ensure the NDK build ran successfully and the .so is bundled " +
-                "under jniLibs/<abi>/ for this device's ABI.",
-                libraryLoadError
-            )
-        }
-        stopRequested.set(false)
-        isRunning.set(true)
-        return try {
-            nativeMainFromFile(configPath, tunFd)
-        } finally {
-            isRunning.set(false)
-        }
+    (*env)->ReleaseStringUTFChars(env, jConfig, cConfig);
+
+    g_running = 1;
+    if (pthread_create(&g_thread, NULL, run_tunnel, args) != 0) {
+        g_running = 0;
+        free(args->config);
+        free(args);
+        return -4; /* pthread_create failed */
     }
 
-    /**
-     * Requests a clean shutdown of the tunnel loop, if one is running.
-     * Safe to call multiple times and/or concurrently from multiple
-     * threads/coroutines — only the first call in a given session actually
-     * reaches the native layer; every other call becomes a no-op.
-     */
-    fun stop() {
-        if (isRunning.get() && stopRequested.compareAndSet(false, true)) {
-            nativeQuit()
+    /* Wait for the tunnel thread to finish (blocking) */
+    pthread_join(g_thread, NULL);
+
+    return 0;
+}
+
+/*
+ * JNI: com.example.vpn.HevSocks5Tunnel.nativeQuit()
+ *
+ * Signals the running tunnel loop to shut down.
+ * Safe to call from any thread.
+ */
+JNIEXPORT void JNICALL
+Java_com_example_vpn_HevSocks5Tunnel_nativeQuit(JNIEnv *env, jobject thiz)
+{
+    (void) env;
+    (void) thiz;
+
+    hev_socks5_tunnel_quit();
+
+    /* Optionally wait for thread to finish (with timeout via join) */
+    if (g_running) {
+        /* Give the tunnel up to 2 seconds to exit gracefully */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 2;
+
+        int ret = pthread_timedjoin_np(g_thread, NULL, &ts);
+        if (ret != 0) {
+            /* Thread didn't exit in time — force cancellation */
+            pthread_cancel(g_thread);
+            pthread_join(g_thread, NULL);
         }
+        g_running = 0;
     }
+}
 
-    fun isActive(): Boolean = isRunning.get()
+/*
+ * JNI: com.example.vpn.HevSocks5Tunnel.nativeStats()
+ *
+ * Returns [tx_packets, tx_bytes, rx_packets, rx_bytes] as a long array.
+ */
+JNIEXPORT jlongArray JNICALL
+Java_com_example_vpn_HevSocks5Tunnel_nativeStats(JNIEnv *env, jobject thiz)
+{
+    (void) thiz;
 
-    /**
-     * Writes the YAML config hev-socks5-tunnel expects. This is a separate
-     * file from xray_config.json — the two processes/threads don't share
-     * a config format.
-     */
-    fun writeConfig(
-        destFile: File,
-        socksPort: Int,
-        mtu: Int = 1400
-    ): File {
-        destFile.writeText(
-            """
-            tunnel:
-              name: tun0
-              mtu: $mtu
-              multi-queue: false
-            socks5:
-              address: 127.0.0.1
-              port: $socksPort
-              udp: 'udp'
-            misc:
-              task-stack-size: 20480
-            """.trimIndent()
-        )
-        return destFile
-    }
+    size_t tx_packets = 0, tx_bytes = 0, rx_packets = 0, rx_bytes = 0;
+    hev_socks5_tunnel_stats(&tx_packets, &tx_bytes, &rx_packets, &rx_bytes);
+
+    jlong result[4];
+    result[0] = (jlong) tx_packets;
+    result[1] = (jlong) tx_bytes;
+    result[2] = (jlong) rx_packets;
+    result[3] = (jlong) rx_bytes;
+
+    jlongArray arr = (*env)->NewLongArray(env, 4);
+    (*env)->SetLongArrayRegion(env, arr, 0, 4, result);
+    return arr;
 }
