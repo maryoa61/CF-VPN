@@ -106,39 +106,17 @@ jobs:
 
           OUT="$ROOT/app/src/main/jni/prebuilt/$ABI"
           mkdir -p "$OUT"
-          MERGED="$OUT/libhev-socks5-tunnel.a"
 
-          # Merge using subshell to avoid cd affecting outer loop
-          # Each .a is extracted into its own subdirectory to avoid .o name collisions
-          # (e.g. lwip has src/core/mem.c and src/ports/lib/mem.c — both produce mem.o)
-          (
-            WORK_DIR=$(mktemp -d)
-            cd "$WORK_DIR"
+          # Copy each .a directly — no merging needed
+          # Each archive keeps its own symbol table intact
+          for lib in $(find "$SRC" -name "*.a" -type f 2>/dev/null); do
+            cp "$lib" "$OUT/"
+            echo "  + $(basename "$lib") ($(du -h "$lib" | cut -f1))"
+          done
 
-            # Find and extract ALL .a files into separate directories
-            i=0
-            for lib in $(find "$SRC" -name "*.a" -type f 2>/dev/null); do
-              d="lib_$i"; mkdir -p "$d"; cd "$d"
-              "$TC/llvm-ar" x "$lib"
-              cd "$WORK_DIR"
-              echo "  + $(basename "$lib")"
-              i=$((i+1))
-            done
-
-            # Repack all .o from all subdirectories into one merged static library
-            if find . -name "*.o" -type f | head -1 | grep -q .; then
-              "$TC/llvm-ar" rcs "$MERGED" $(find . -name "*.o" -type f)
-            else
-              echo "::error::No .o files found after extracting .a libraries"
-              exit 1
-            fi
-            cd /
-            rm -rf "$WORK_DIR"
-          )
-
-          SIZE=$(du -h "$MERGED" | cut -f1)
-          SYM=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -c "T " || true)
-          echo "✅ $ABI: $SIZE ($SYM symbols)"
+          SIZE=$(du -sh "$OUT" | cut -f1)
+          SYM=$(find "$OUT" -name "*.a" -exec "$TC/llvm-nm" {} + 2>/dev/null | grep -c "T " || true)
+          echo "✅ $ABI: $SIZE ($SYM symbols total)"
         done
 
     # ── Build ──
