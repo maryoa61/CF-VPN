@@ -13,6 +13,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.data.VpnConfig
 import com.example.vpn.HevSocks5Tunnel
+import com.example.vpn.VpnConnectionManager
+import com.example.vpn.VpnStatus
 import com.example.service.XrayConfigGenerator
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -208,6 +210,8 @@ class XrayVpnService : VpnService() {
             }
 
             isRunning.set(true)
+            // اطلاع‌رسانی وضعیت به UI
+            VpnConnectionManager.getInstance(this).setStatus(VpnStatus.CONNECTED)
             Log.i(TAG, "XrayVpnService started successfully for: ${config.name} (${config.type})")
         } catch (e: Exception) {
             Log.e(TAG, "Error starting VPN: ${e.message}", e)
@@ -345,6 +349,8 @@ class XrayVpnService : VpnService() {
         }
 
         Log.i(TAG, "Stopping VPN safely...")
+        // اطلاع‌رسانی وضعیت به UI
+        VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED)
 
         // مرحله ۱: توقف hev-socks5-tunnel
         try {
@@ -401,6 +407,8 @@ class XrayVpnService : VpnService() {
         tunInterface = null
         runCatching { stopXrayCore() }
         isRunning.set(false)
+        // اطلاع‌رسانی وضعیت به UI
+        runCatching { VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED) }
         currentConfig = null
     }
 
