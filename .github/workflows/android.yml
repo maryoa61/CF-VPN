@@ -1,0 +1,184 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: "26.1.10909125"
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        distribution: zulu
+        java-version: '21'
+        cache: gradle
+
+    # ── Xray AAR ──
+    - name: Download Xray AAR
+      run: |
+        set -e
+        mkdir -p app/libs
+
+        SOURCES=(
+          "XTLS/libXray|https://github.com/XTLS/libXray/releases/latest/download/libxray-android.zip|zip"
+          "2dust/AndroidLibXrayLite|https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar|direct"
+          "CF-VPN release|https://github.com/maryoa61/CF-VPN/releases/download/v1.0/libv2ray.aar|direct"
+        )
+        for entry in "${SOURCES[@]}"; do
+          IFS='|' read -r name url type <<< "$entry"
+          echo "Trying $name..."
+          if [ "$type" = "zip" ]; then
+            TMP=$(mktemp)
+            curl -sL --fail --retry 3 -o "$TMP" "$url" || { rm -f "$TMP"; continue; }
+            unzip -o -j "$TMP" "*/libXray.aar" -d app/libs/ 2>/dev/null || \
+            unzip -o -j "$TMP" "libXray.aar" -d app/libs/ 2>/dev/null || { rm -f "$TMP"; continue; }
+            mv app/libs/libXray.aar app/libs/libv2ray.aar 2>/dev/null || true
+            rm -f "$TMP"
+          else
+            curl -sL --fail --retry 3 -o app/libs/libv2ray.aar "$url" || continue
+          fi
+          SIZE=$(stat -c%s app/libs/libv2ray.aar 2>/dev/null || echo 0)
+          if [ "$SIZE" -gt 10000000 ]; then
+            echo "✅ $name ($(du -h app/libs/libv2ray.aar | cut -f1))"
+            break
+          fi
+          rm -f app/libs/libv2ray.aar
+        done
+        [ -f app/libs/libv2ray.aar ] || { echo "::error::Xray AAR download failed"; exit 1; }
+
+    # ── Build hev-socks5-tunnel ──
+    - name: Clone hev-socks5-tunnel
+      run: git clone --recursive --depth 1 https://github.com/heiher/hev-socks5-tunnel app/src/main/jni/hev-socks5-tunnel
+
+    - name: Install NDK
+      run: |
+        if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+          echo "Installing NDK $NDK_VERSION..."
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "ndk;$NDK_VERSION" 2>&1 | tail -5
+        fi
+        NDK_CLANG="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+        if [ -x "$NDK_CLANG" ]; then
+          echo "✅ NDK $NDK_VERSION ready"
+        else
+          echo "::error::NDK clang not found at $NDK_CLANG"
+          ls "$ANDROID_HOME/ndk/" 2>/dev/null || echo "No NDKs installed"
+          exit 1
+        fi
+
+    - name: Build static libs (all ABIs)
+      run: |
+        set -e
+        TC="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        SRC="$(pwd)/app/src/main/jni/hev-socks5-tunnel"
+        API=24
+        ROOT="$(pwd)"
+
+        for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
+          case $ABI in
+            arm64-v8a)        TRIPLE=aarch64-linux-android ;;
+            armeabi-v7a)      TRIPLE=armv7a-linux-androideabi ;;
+            x86)              TRIPLE=i686-linux-android ;;
+            x86_64)           TRIPLE=x86_64-linux-android ;;
+          esac
+          echo "━━━ $ABI ($TRIPLE) ━━━"
+          make -C "$SRC" clean || true
+          rm -rf "$SRC/bin"
+
+          make -C "$SRC" static -j"$(nproc)" \
+            CC="$TC/${TRIPLE}${API}-clang" \
+            AR="$TC/llvm-ar" \
+            CFLAGS="-DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY -Wno-error=unused-result -fPIC"
+
+          OUT="$ROOT/app/src/main/jni/prebuilt/$ABI"
+          mkdir -p "$OUT"
+          MERGED="$OUT/libhev-socks5-tunnel.a"
+
+          # Merge using subshell to avoid cd affecting outer loop
+          (
+            WORK_DIR=$(mktemp -d)
+            cd "$WORK_DIR"
+
+            # Find and extract ALL .a files produced by make static
+            for lib in $(find "$SRC" -name "*.a" -type f 2>/dev/null); do
+              "$TC/llvm-ar" x "$lib"
+              echo "  + $(basename "$lib")"
+            done
+
+            # Repack all .o into one merged static library
+            if ls *.o 1>/dev/null 2>&1; then
+              "$TC/llvm-ar" rcs "$MERGED" *.o
+            else
+              echo "::error::No .o files found after extracting .a libraries"
+              exit 1
+            fi
+            cd /
+            rm -rf "$WORK_DIR"
+          )
+
+          SIZE=$(du -h "$MERGED" | cut -f1)
+          SYM=$("$TC/llvm-nm" "$MERGED" 2>/dev/null | grep -c "T " || true)
+          echo "✅ $ABI: $SIZE ($SYM symbols)"
+        done
+
+    # ── Build ──
+    - name: Create Debug Keystore
+      run: |
+        openssl req -x509 -newkey rsa:2048 -keyout /tmp/key.pem -out /tmp/cert.pem \
+          -days 10000 -nodes -subj "/CN=Debug/O=CFVPN/C=IR" 2>/dev/null
+        openssl pkcs12 -export -out debug.keystore \
+          -inkey /tmp/key.pem -in /tmp/cert.pem \
+          -name "androiddebugkey" -passout pass:android
+        rm -f /tmp/key.pem /tmp/cert.pem
+        echo "✅ Debug keystore created"
+
+    - run: chmod +x gradlew
+
+    - name: Create .env defaults for Secrets plugin
+      run: |
+        echo 'MAPS_API_KEY=""' > .env
+        echo 'KEYSTORE_PATH=""' >> .env
+        echo 'STORE_PASSWORD="android"' >> .env
+        echo 'KEY_PASSWORD="android"' >> .env
+        cat .env
+
+    - name: Tests
+      run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+    - name: Build APK
+      run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+    - name: Verify APK
+      run: |
+        set -e
+        APK=$(find app/build/outputs/apk -name '*.apk' -type f | head -1)
+        [ -n "$APK" ] || { echo "::error::No APK found"; exit 1; }
+        echo "📦 APK: $APK ($(du -h "$APK" | cut -f1))"
+        WORK=$(mktemp -d)
+        unzip -o -q "$APK" -d "$WORK"
+        echo "Native libs:"
+        find "$WORK/lib" -name "*.so" -exec du -h {} \; 2>/dev/null || echo "none"
+        find "$WORK/lib" -name "libhev2socks_bridge.so" | grep -q . || echo "::warning::bridge .so missing"
+        rm -rf "$WORK"
+
+    - name: Upload APK
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: CF-VPN-release
+        path: app/build/outputs/apk/**/*.apk
+        if-no-files-found: error
