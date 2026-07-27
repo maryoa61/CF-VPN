@@ -173,10 +173,11 @@ object XrayConfigGenerator {
             }
         }
 
-        // ── Mux: ترکیب اتصالات (کمک به مقابله با Throttling) ──
-        // فقط برای TCP/WS (نه Reality/XTLS که خودشان multiplex دارند)
+        // ── Mux: ترکیب اتصالات ──
+        // فقط برای TCP (نه WS، Reality/XTLS، gRPC)
+        // WS+Mux با Cloudflare و بعضی سرورها مشکل داره
         if (config.security != "reality" && config.security != "xtls" &&
-            config.network != "grpc") {
+            config.network != "grpc" && config.network != "ws") {
             outbound.put("mux", JSONObject().apply {
                 put("enabled", true)
                 put("concurrency", 8)

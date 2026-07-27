@@ -140,6 +140,7 @@ class MainActivity : ComponentActivity() {
             val configJson = moshi.adapter(VpnConfig::class.java).toJson(config)
 
             val intent = Intent(this, XrayVpnService::class.java).apply {
+                action = XrayVpnService.ACTION_START
                 putExtra(XrayVpnService.EXTRA_CONFIG_JSON, configJson)
             }
             startService(intent)
