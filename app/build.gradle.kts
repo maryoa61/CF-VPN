@@ -86,12 +86,6 @@ android {
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
-  defaultProperties.set(mapOf(
-    "MAPS_API_KEY" to "\"\"",
-    "KEYSTORE_PATH" to "\"\"",
-    "STORE_PASSWORD" to "\"android\"",
-    "KEY_PASSWORD" to "\"android\""
-  ))
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }

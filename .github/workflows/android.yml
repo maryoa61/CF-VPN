@@ -150,8 +150,7 @@ jobs:
 
     - name: Create .env defaults for Secrets plugin
       run: |
-        echo 'MAPS_API_KEY=""' > .env
-        echo 'KEYSTORE_PATH=""' >> .env
+        echo 'KEYSTORE_PATH=""' > .env
         echo 'STORE_PASSWORD="android"' >> .env
         echo 'KEY_PASSWORD="android"' >> .env
         cat .env
