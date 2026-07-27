@@ -86,7 +86,7 @@ android {
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
-  propertiesMap.set(mapOf(
+  defaultProperties.set(mapOf(
     "MAPS_API_KEY" to "\"\"",
     "KEYSTORE_PATH" to "\"\"",
     "STORE_PASSWORD" to "\"android\"",
