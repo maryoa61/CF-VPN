@@ -148,13 +148,6 @@ jobs:
 
     - run: chmod +x gradlew
 
-    - name: Create .env defaults for Secrets plugin
-      run: |
-        echo 'KEYSTORE_PATH=""' > .env
-        echo 'STORE_PASSWORD="android"' >> .env
-        echo 'KEY_PASSWORD="android"' >> .env
-        cat .env
-
     - name: Tests
       run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 

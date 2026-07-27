@@ -5,7 +5,6 @@ plugins {
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
-  alias(libs.plugins.secrets)
   alias(libs.plugins.google.services)
 }
 
@@ -33,6 +32,14 @@ android {
     ndk {
       abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
     }
+
+    // BuildConfig fields — values come from env vars, with safe defaults
+    val ksPath: String = System.getenv("KEYSTORE_PATH") ?: ""
+    val storePass: String = System.getenv("STORE_PASSWORD") ?: "android"
+    val keyPass: String = System.getenv("KEY_PASSWORD") ?: "android"
+    buildConfigField("String", "KEYSTORE_PATH", "\"$ksPath\"")
+    buildConfigField("String", "STORE_PASSWORD", "\"$storePass\"")
+    buildConfigField("String", "KEY_PASSWORD", "\"$keyPass\"")
   }
 
   signingConfigs {
@@ -79,13 +86,6 @@ android {
     abortOnError = false
     checkReleaseBuilds = false
   }
-}
-
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
