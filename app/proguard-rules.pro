@@ -18,11 +18,15 @@
 -keep class com.example.data.VpnConfigDao { *; }
 -keep class com.example.data.VpnDatabase { *; }
 
-# Xray/V2Ray JNI reflection
+# Xray/V2Ray JNI reflection — all AAR versions
+-keep class libv2ray.** { *; }
 -keep class io.coreny.v2ray.Libv2ray { *; }
 -keep class io.coreny.Libv2ray { *; }
 -keep class xray.lib.Xray { *; }
 -keep class xray.lib.Libv2ray { *; }
+
+# Go gobind runtime (used by libv2ray.aar v26+)
+-keep class go.** { *; }
 
 # Kotlin Coroutines
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
@@ -34,10 +38,6 @@
 -dontwarn retrofit2.**
 -keep class okhttp3.** { *; }
 -keep class retrofit2.** { *; }
-
-# Firebase
--keep class com.google.firebase.** { *; }
--dontwarn com.google.firebase.**
 
 # General
 -keepattributes Signature
