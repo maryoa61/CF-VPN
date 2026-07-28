@@ -165,18 +165,22 @@ class XrayVpnService : VpnService() {
         }
 
         currentConfig = config
+        val logManager = VpnConnectionManager.getInstance(this)
 
         try {
             // ── مرحله ۱: تولید کانفیگ Xray (بهینه‌شده برای ایران) ──
+            logManager.log("Step 1/5: Generating Xray config...")
             xrayConfigFile = File(cacheDir, "xray_config.json")
             val xrayConfigJson = XrayConfigGenerator.generate(config, filesDir)
             xrayConfigFile.writeText(xrayConfigJson)
             Log.d(TAG, "Xray config written to ${xrayConfigFile.absolutePath}")
 
             // ── مرحله ۲: استارت هسته Xray ──
+            logManager.log("Step 2/5: Starting Xray-core...")
             startXrayCore(xrayConfigFile)
 
             // ── مرحله ۳: ساخت TUN interface ──
+            logManager.log("Step 3/5: Creating TUN interface...")
             val establishedFd = establishTunInterface()
                 ?: throw IllegalStateException(
                     "TUN establish() returned null — VPN permission not granted " +
@@ -185,6 +189,7 @@ class XrayVpnService : VpnService() {
             tunInterface = establishedFd
 
             // ── مرحله ۴: نوشتن کانفیگ YAML برای hev-socks5-tunnel ──
+            logManager.log("Step 4/5: Writing tunnel config...")
             tunnelConfigFile = File(cacheDir, "tunnel_config.yaml")
             HevSocks5Tunnel.writeConfig(
                 destFile = tunnelConfigFile,
@@ -193,6 +198,7 @@ class XrayVpnService : VpnService() {
             )
 
             // ── مرحله ۵: اجرای hev-socks5-tunnel (ترد بلاکینگ) ──
+            logManager.log("Step 5/5: Starting hev-socks5-tunnel...")
             tunnelThread = Thread({
                 try {
                     Log.i(TAG, "hev-socks5-tunnel thread started.")
@@ -215,7 +221,9 @@ class XrayVpnService : VpnService() {
             VpnConnectionManager.getInstance(this).setStatus(VpnStatus.CONNECTED)
             Log.i(TAG, "XrayVpnService started successfully for: ${config.name} (${config.type})")
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting VPN: ${e.message}", e)
+            val errorMsg = "VPN Error: ${e.message ?: e.javaClass.simpleName}"
+            Log.e(TAG, errorMsg, e)
+            VpnConnectionManager.getInstance(this).log(errorMsg)
             cleanupAfterFailure()
             stopSelf()
         }
