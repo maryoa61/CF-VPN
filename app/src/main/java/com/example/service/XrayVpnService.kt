@@ -54,41 +54,54 @@ class XrayVpnService : VpnService() {
         private const val TUN_SESSION_NAME = "CF-VPN"
 
         // ── Xray Core JNI Bridge ──
-        // libv2ray.aar (2dust/AndroidLibXrayLite) → io.coreny.v2ray.Libv2ray
-        // libXray.aar (XTLS/libXray)               → xray.lib.Xray یا Libv2ray
-        // اگر هیچکدام وجود نداشته باشد، startXrayCore خطا می‌دهد.
-        private var xrayRunMethod: java.lang.reflect.Method? = null
+        // libv2ray.aar (2dust/AndroidLibXrayLite)
+        //   v26+: libv2ray.Libv2ray → newCoreController(config, cb) → startLoop/stopLoop
+        //   قدیمی‌تر: io.coreny.v2ray.Libv2ray → runV2Ray(String) / stopV2Ray()
+        // libXray.aar (XTLS/libXray) → xray.lib.Xray → runV2Ray / stopV2Ray
+        private var xrayController: Any? = null
+        private var xrayStartMethod: java.lang.reflect.Method? = null
         private var xrayStopMethod: java.lang.reflect.Method? = null
+        private var xrayNewControllerMethod: java.lang.reflect.Method? = null
+        private var xrayCallbackHandlerClass: Class<*>? = null
 
         init {
-            // لیست کلاس‌های ممکن برای Xray AAR
-            val candidates = listOf(
-                "libv2ray.Libv2ray",            // AndroidLibXrayLite v26+ (gobind)
-                "io.coreny.v2ray.Libv2ray",     // AndroidLibXrayLite قدیمی‌تر
-                "io.coreny.Libv2ray",           // نسخه‌های خیلی قدیمی
-                "xray.lib.Xray",                // libXray (XTLS)
-                "xray.lib.Libv2ray",            // نسخه‌های جایگزین
-            )
-
-            for (className in candidates) {
-                try {
-                    val clazz = Class.forName(className)
-                    val run = clazz.getMethod("runV2Ray", String::class.java)
-                    val stop = clazz.getMethod("stopV2Ray")
-                    xrayRunMethod = run
-                    xrayStopMethod = stop
-                    Log.i(TAG, "Xray AAR loaded: $className")
-                    break
-                } catch (_: ClassNotFoundException) {
-                    // این کلاس وجود نداره، بعدی رو امتحان کن
-                } catch (_: NoSuchMethodException) {
-                    // کلاس هست ولی متدها فرق داره
+            // ── Strategy 1: v26+ API (libv2ray.Libv2ray.newCoreController) ──
+            try {
+                val clazz = Class.forName("libv2ray.Libv2ray")
+                val callbackClass = Class.forName("libv2ray.CoreCallbackHandler")
+                val controllerClass = Class.forName("libv2ray.CoreController")
+                val newCtrl = clazz.getMethod("newCoreController", String::class.java, callbackClass)
+                val startLoop = controllerClass.getMethod("startLoop")
+                val stopLoop = controllerClass.getMethod("stopLoop")
+                xrayNewControllerMethod = newCtrl
+                xrayStartMethod = startLoop
+                xrayStopMethod = stopLoop
+                xrayCallbackHandlerClass = callbackClass
+                Log.i(TAG, "Xray AAR loaded (v26+ API): libv2ray.Libv2ray")
+            } catch (_: Exception) {
+                // ── Strategy 2: قدیمی‌تر API (runV2Ray / stopV2Ray) ──
+                val oldCandidates = listOf(
+                    "io.coreny.v2ray.Libv2ray",
+                    "io.coreny.Libv2ray",
+                    "xray.lib.Xray",
+                    "xray.lib.Libv2ray",
+                )
+                for (className in oldCandidates) {
+                    try {
+                        val clazz = Class.forName(className)
+                        val run = clazz.getMethod("runV2Ray", String::class.java)
+                        val stop = clazz.getMethod("stopV2Ray")
+                        xrayStartMethod = run
+                        xrayStopMethod = stop
+                        Log.i(TAG, "Xray AAR loaded (legacy API): $className")
+                        break
+                    } catch (_: ClassNotFoundException) { }
+                    catch (_: NoSuchMethodException) { }
                 }
             }
 
-            if (xrayRunMethod == null) {
+            if (xrayStartMethod == null) {
                 Log.w(TAG, "No compatible Xray AAR found. " +
-                    "Tried: ${candidates.joinToString()}. " +
                     "Place libv2ray.aar or libXray.aar in app/libs/.")
             }
         }
@@ -287,37 +300,57 @@ class XrayVpnService : VpnService() {
 
     /**
      * شروع هسته Xray با فایل کانفیگ.
-     *
-     * از reflection برای فراخوانی Libv2ray.runV2Ray() استفاده می‌شود
-     * تا در صورت عدم وجود AAR، اپ کرش نکند (خطا به وضوح لاگ می‌شود).
+     * پشتیبانی از هر دو API: v26+ (newCoreController) و قدیمی‌تر (runV2Ray).
      */
     private fun startXrayCore(configFile: File) {
         if (!configFile.exists()) {
             throw IllegalStateException("Xray config file not found: ${configFile.absolutePath}")
         }
 
-        val runMethod = xrayRunMethod
-        if (runMethod == null) {
-            throw IllegalStateException(
-                "libv2ray.aar is not available. " +
-                "Please place libv2ray.aar (or libXray.aar) in app/libs/ " +
-                "and ensure it exposes Libv2ray.runV2Ray(String):String. " +
-                "Download from: https://github.com/XTLS/libXray/releases"
+        val configJson = configFile.readText()
+        val startMethod = xrayStartMethod
+            ?: throw IllegalStateException(
+                "libv2ray.aar is not available. Place libv2ray.aar in app/libs/."
             )
-        }
 
         try {
             Log.i(TAG, "Starting Xray-core with config: ${configFile.absolutePath}")
-            val errorMsg = runMethod.invoke(null, configFile.absolutePath) as? String
 
-            if (!errorMsg.isNullOrEmpty()) {
-                throw IllegalStateException("Xray-core returned error: $errorMsg")
+            if (xrayNewControllerMethod != null && xrayCallbackHandlerClass != null) {
+                // ── v26+ API: newCoreController → startLoop ──
+                // ایجاد callback handler ساده
+                val callbackHandler = createMinimalCallbackHandler()
+                val controller = xrayNewControllerMethod!!.invoke(
+                    null, configJson, callbackHandler
+                )
+                xrayController = controller
+                startMethod.invoke(controller)
+                Log.i(TAG, "Xray-core started (v26+ API).")
+            } else {
+                // ── Legacy API: runV2Ray(String) ──
+                val errorMsg = startMethod.invoke(null, configJson) as? String
+                if (!errorMsg.isNullOrEmpty()) {
+                    throw IllegalStateException("Xray-core returned error: $errorMsg")
+                }
+                Log.i(TAG, "Xray-core started (legacy API).")
             }
-            Log.i(TAG, "Xray-core started successfully.")
         } catch (e: java.lang.reflect.InvocationTargetException) {
             val cause = e.cause ?: e
             throw IllegalStateException("Xray-core JNI call failed: ${cause.message}", cause)
         }
+    }
+
+    /**
+     * ایجاد یک callback handler ساده برای v26+ API.
+     * CoreCallbackHandler یک کلاس abstract هست که باید متدهاش رو override کنیم.
+     */
+    private fun createMinimalCallbackHandler(): Any {
+        val handlerClass = xrayCallbackHandlerClass!!
+        // CoreCallbackHandler یک GoObject proxy هست، مستقیماً میسازیمش
+        // با reflection یک نمونه خالی بسازیم
+        val constructor = handlerClass.getDeclaredConstructor()
+        constructor.isAccessible = true
+        return constructor.newInstance()
     }
 
     /**
@@ -332,7 +365,12 @@ class XrayVpnService : VpnService() {
 
         try {
             Log.i(TAG, "Stopping Xray-core...")
-            stopMethod.invoke(null)
+            if (xrayController != null) {
+                stopMethod.invoke(xrayController)
+                xrayController = null
+            } else {
+                stopMethod.invoke(null)
+            }
             Log.i(TAG, "Xray-core stopped.")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping Xray-core: ${e.message}", e)
