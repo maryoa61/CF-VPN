@@ -63,6 +63,7 @@ class XrayVpnService : VpnService() {
         private var xrayStopMethod: java.lang.reflect.Method? = null
         private var xrayNewControllerMethod: java.lang.reflect.Method? = null
         private var xrayCallbackHandlerClass: Class<*>? = null
+        private var xrayDebugInfo: String? = null
 
         init {
             // ── Step 0: Load native library FIRST (gobind requires it) ──
@@ -107,8 +108,6 @@ class XrayVpnService : VpnService() {
             }
         }
 
-        // Debug info for app logs
-        private var xrayDebugInfo: String? = null
         fun getDebugInfo(): String? = xrayDebugInfo
     }
 
