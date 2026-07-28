@@ -2636,8 +2636,26 @@ fun SettingsScreen(
                 }
             },
             confirmButton = {
-                Button(onClick = { showLogcatDialog = false }) {
-                    Text("Close")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            val allLogs = logs.joinToString("\n")
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("CF-VPN Logs", allLogs)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "Logs copied to clipboard (${logs.size} lines)", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Copy Logs")
+                    }
+                    Button(onClick = { showLogcatDialog = false }) {
+                        Text("Close")
+                    }
                 }
             }
         )
