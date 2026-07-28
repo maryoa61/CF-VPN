@@ -86,12 +86,8 @@ android {
 }
 
 dependencies {
-  // Xray-core JNI wrapper (download from https://github.com/XTLS/libXray/releases)
-  if (file("libs/libv2ray.aar").exists()) {
-    implementation(files("libs/libv2ray.aar"))
-  } else {
-    logger.warn("WARNING: libs/libv2ray.aar not found")
-  }
+  // Xray-core JNI wrapper — flatDir handles AAR classes + native libs properly
+  implementation(name = "libv2ray", ext = "aar")
 
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
