@@ -65,7 +65,16 @@ class XrayVpnService : VpnService() {
         private var xrayCallbackHandlerClass: Class<*>? = null
 
         init {
-            // ── Strategy 1: v26+ API (libv2ray.Libv2ray.newCoreController) ──
+            // ── Step 0: Load native library FIRST (gobind requires it) ──
+            try {
+                System.loadLibrary("gojni")
+                Log.i(TAG, "Native library gojni loaded OK")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "FAILED to load gojni: ${e.message}")
+                xrayDebugInfo = "gojni load failed: ${e.message}"
+            }
+
+            // ── Strategy 1: v26+ API ──
             try {
                 val clazz = Class.forName("libv2ray.Libv2ray")
                 val callbackClass = Class.forName("libv2ray.CoreCallbackHandler")
@@ -77,34 +86,30 @@ class XrayVpnService : VpnService() {
                 xrayStartMethod = startLoop
                 xrayStopMethod = stopLoop
                 xrayCallbackHandlerClass = callbackClass
-                Log.i(TAG, "Xray AAR loaded (v26+ API): libv2ray.Libv2ray")
-            } catch (_: Exception) {
-                // ── Strategy 2: قدیمی‌تر API (runV2Ray / stopV2Ray) ──
-                val oldCandidates = listOf(
-                    "io.coreny.v2ray.Libv2ray",
-                    "io.coreny.Libv2ray",
-                    "xray.lib.Xray",
-                    "xray.lib.Libv2ray",
-                )
-                for (className in oldCandidates) {
+                Log.i(TAG, "Xray AAR v26+ loaded OK")
+            } catch (e: Exception) {
+                Log.w(TAG, "v26 API failed: ${e.cause?.javaClass?.simpleName ?: e.javaClass.simpleName}: ${e.cause?.message ?: e.message}")
+                // ── Strategy 2: Legacy API ──
+                for (name in listOf("io.coreny.v2ray.Libv2ray", "io.coreny.Libv2ray", "xray.lib.Xray", "xray.lib.Libv2ray")) {
                     try {
-                        val clazz = Class.forName(className)
-                        val run = clazz.getMethod("runV2Ray", String::class.java)
-                        val stop = clazz.getMethod("stopV2Ray")
-                        xrayStartMethod = run
-                        xrayStopMethod = stop
-                        Log.i(TAG, "Xray AAR loaded (legacy API): $className")
+                        val clazz = Class.forName(name)
+                        xrayStartMethod = clazz.getMethod("runV2Ray", String::class.java)
+                        xrayStopMethod = clazz.getMethod("stopV2Ray")
+                        Log.i(TAG, "Xray AAR legacy loaded: $name")
                         break
-                    } catch (_: ClassNotFoundException) { }
-                    catch (_: NoSuchMethodException) { }
+                    } catch (_: Exception) { }
                 }
             }
 
             if (xrayStartMethod == null) {
-                Log.w(TAG, "No compatible Xray AAR found. " +
-                    "Place libv2ray.aar or libXray.aar in app/libs/.")
+                Log.e(TAG, "No compatible Xray AAR found!")
+                xrayDebugInfo = "AAR classes not found. gojni loaded: ${(xrayDebugInfo == null)}"
             }
         }
+
+        // Debug info for app logs
+        private var xrayDebugInfo: String? = null
+        fun getDebugInfo(): String? = xrayDebugInfo
     }
 
     // ── وضعیت داخلی ──
@@ -309,9 +314,12 @@ class XrayVpnService : VpnService() {
 
         val configJson = configFile.readText()
         val startMethod = xrayStartMethod
-            ?: throw IllegalStateException(
-                "libv2ray.aar is not available. Place libv2ray.aar in app/libs/."
+        if (startMethod == null) {
+            val debug = getDebugInfo() ?: "unknown"
+            throw IllegalStateException(
+                "Xray AAR not loaded. $debug"
             )
+        }
 
         try {
             Log.i(TAG, "Starting Xray-core with config: ${configFile.absolutePath}")
