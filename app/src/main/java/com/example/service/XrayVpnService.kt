@@ -63,8 +63,9 @@ class XrayVpnService : VpnService() {
         init {
             // لیست کلاس‌های ممکن برای Xray AAR
             val candidates = listOf(
-                "io.coreny.v2ray.Libv2ray",    // AndroidLibXrayLite (2dust)
-                "io.coreny.Libv2ray",           // نسخه‌های قدیمی‌تر
+                "libv2ray.Libv2ray",            // AndroidLibXrayLite v26+ (gobind)
+                "io.coreny.v2ray.Libv2ray",     // AndroidLibXrayLite قدیمی‌تر
+                "io.coreny.Libv2ray",           // نسخه‌های خیلی قدیمی
                 "xray.lib.Xray",                // libXray (XTLS)
                 "xray.lib.Libv2ray",            // نسخه‌های جایگزین
             )
