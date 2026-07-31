@@ -8,51 +8,78 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 object VpnParser {
+
     fun parseLink(link: String): VpnConfig? {
         val trimmed = link.trim()
         if (trimmed.isEmpty()) return null
 
         return try {
-            if (trimmed.startsWith("vmess://", ignoreCase = true)) {
+            val cfg = if (trimmed.startsWith("vmess://", ignoreCase = true)) {
                 parseVmess(trimmed)
             } else {
                 parseStandardUri(trimmed)
             }
+            cfg?.let { normalize(it) }
         } catch (e: Exception) {
             e.printStackTrace()
-            // Return a fallback partial config if the URI scheme is recognized but parse failed
+
+            // Fallback: اگر scheme را تشخیص دادیم، حداقل یک config قابل ذخیره بسازیم
             try {
                 val uri = Uri.parse(trimmed)
-                val scheme = uri.scheme?.lowercase() ?: "custom"
-                if (scheme in listOf("vless", "ss", "trojan", "hysteria2", "hy2")) {
+                val schemeRaw = uri.scheme?.lowercase() ?: return null
+                val scheme = normalizeScheme(schemeRaw)
+
+                if (scheme in listOf("vless", "shadowsocks", "trojan", "hysteria2")) {
                     val host = uri.host ?: "unknown"
                     val port = if (uri.port != -1) uri.port else 443
-                    val name = uri.fragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "imported_${scheme}"
+
+                    // fragment ممکن است null باشد یا encoding عجیب داشته باشد
+                    val name = uri.fragment?.let {
+                        try {
+                            URLDecoder.decode(it, "UTF-8")
+                        } catch (_: Exception) {
+                            it
+                        }
+                    } ?: "imported_${scheme}"
+
                     VpnConfig(
                         name = name,
-                        type = if (scheme == "hy2") "hysteria2" else scheme,
+                        type = scheme,
                         address = host,
                         port = port,
                         rawLink = trimmed
                     )
                 } else null
-            } catch (ex: Exception) {
+            } catch (_: Exception) {
                 null
             }
         }
     }
 
+    private fun normalizeScheme(s: String): String {
+        return when (s.lowercase()) {
+            "ss" -> "shadowsocks"
+            "hy2" -> "hysteria2"
+            else -> s.lowercase()
+        }
+    }
+
+    private fun normalize(cfg: VpnConfig): VpnConfig {
+        val normalizedType = normalizeScheme(cfg.type)
+        return if (normalizedType == cfg.type) cfg else cfg.copy(type = normalizedType)
+    }
+
     private fun parseVmess(link: String): VpnConfig? {
-        val rawBase64 = link.substring(8)
+        val rawBase64 = link.removePrefix("vmess://")
         val jsonStr = try {
             val decodedBytes = Base64.decode(rawBase64, Base64.DEFAULT)
             String(decodedBytes, StandardCharsets.UTF_8)
-        } catch (e: Exception) {
-            // Some vmess links might have padding issues
+        } catch (_: Exception) {
+            // بعضی vmess ها padding ندارند یا URL-safe هستند
             try {
                 val decodedBytes = Base64.decode(rawBase64, Base64.NO_PADDING or Base64.URL_SAFE)
                 String(decodedBytes, StandardCharsets.UTF_8)
-            } catch (ex: Exception) {
+            } catch (_: Exception) {
                 return null
             }
         }
@@ -66,11 +93,14 @@ object VpnParser {
             val uuid = json.optString("id", "")
             val alterId = json.optString("aid", "0").toIntOrNull() ?: 0
             val network = json.optString("net", "tcp").ifEmpty { "tcp" }
+
             val tlsField = json.optString("tls", "")
             val security = if (tlsField == "tls" || tlsField == "reality") tlsField else "none"
+
             val sni = json.optString("sni", "").ifEmpty { null }
             val wsPath = json.optString("path", "").ifEmpty { null }
             val wsHost = json.optString("host", "").ifEmpty { null }
+
             VpnConfig(
                 name = name,
                 type = "vmess",
@@ -85,37 +115,35 @@ object VpnParser {
                 wsPath = wsPath,
                 wsHost = wsHost
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
 
     private fun parseStandardUri(link: String): VpnConfig? {
         val uri = Uri.parse(link)
-        val scheme = uri.scheme?.lowercase() ?: return null
+        val schemeRaw = uri.scheme?.lowercase() ?: return null
 
-        val type = when (scheme) {
+        val type = when (schemeRaw) {
             "vless" -> "vless"
             "ss" -> "shadowsocks"
             "trojan" -> "trojan"
             "hysteria2", "hy2" -> "hysteria2"
-            else -> return null // Unsupported protocol
+            else -> return null
         }
 
-        // URI parsing of host might fail if of format ss://method:password@host:port
-        // Let's fallback to manual regex/string splitting if host is null or empty
         var host = uri.host
         var port = uri.port
-
-        // userInfo holds the UUID (vless) or password (trojan). android.net.Uri auto-decodes
-        // %XX escapes here (e.g. %5B -> [), so this is already the raw secret.
         var userInfo = uri.userInfo
 
+        // manual parsing اگر Uri نتوانست host/port را درست بخواند
+        var manualFragment: String? = null
         if (host == null || port == -1) {
-            // Manual parsing
-            val withoutScheme = link.substring(scheme.length + 3) // remove "vless://"
+            val withoutScheme = link.substring(schemeRaw.length + 3) // remove "xxx://"
+
             val hashIndex = withoutScheme.indexOf("#")
             val mainPart = if (hashIndex != -1) withoutScheme.substring(0, hashIndex) else withoutScheme
+            manualFragment = if (hashIndex != -1) withoutScheme.substring(hashIndex + 1) else null
 
             val atIndex = mainPart.lastIndexOf("@")
             val connPart = if (atIndex != -1) mainPart.substring(atIndex + 1) else mainPart
@@ -124,7 +152,7 @@ object VpnParser {
                 val rawUserInfo = mainPart.substring(0, atIndex)
                 userInfo = try {
                     URLDecoder.decode(rawUserInfo, "UTF-8")
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     rawUserInfo
                 }
             }
@@ -132,7 +160,7 @@ object VpnParser {
             // connPart is "host:port?query"
             val queryIndex = connPart.indexOf("?")
             val hostPortPart = if (queryIndex != -1) connPart.substring(0, queryIndex) else connPart
-            
+
             val colonIndex = hostPortPart.lastIndexOf(":")
             if (colonIndex != -1) {
                 host = hostPortPart.substring(0, colonIndex)
@@ -143,78 +171,6 @@ object VpnParser {
             }
         }
 
-        val name = uri.fragment?.let { 
-            try {
-                URLDecoder.decode(it, "UTF-8")
-            } catch (e: Exception) {
-                it
-            }
-        } ?: "${type}_node_${host.take(5)}"
-
-        // Extract query parameters for VLESS, if applicable
-        val uuid = if (type == "vless") userInfo else null
-        var password = if (type == "trojan") userInfo else null
-        var ssMethod: String? = null
-
-        if (type == "shadowsocks" && userInfo != null) {
-            // ss:// userInfo is normally base64("method:password"); some legacy
-            // links put "method:password" in plain text instead. Try both.
-            val decoded = try {
-                String(Base64.decode(userInfo, Base64.DEFAULT), StandardCharsets.UTF_8)
-            } catch (e: Exception) {
-                try {
-                    String(Base64.decode(userInfo, Base64.URL_SAFE or Base64.NO_PADDING), StandardCharsets.UTF_8)
-                } catch (ex: Exception) {
-                    userInfo
-                }
-            }
-            val sepIndex = decoded.indexOf(":")
-            if (sepIndex != -1) {
-                ssMethod = decoded.substring(0, sepIndex)
-                password = decoded.substring(sepIndex + 1)
-            }
-        }
-        val security = uri.getQueryParameter("security") ?: "none"
-        val flow = uri.getQueryParameter("flow") ?: "none"
-        val sni = uri.getQueryParameter("sni")
-        val publicKey = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey")
-        val shortId = uri.getQueryParameter("sid") ?: uri.getQueryParameter("shortId")
-        val network = uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp"
-
-        // WebSocket transport settings (used when network == "ws"). Uri.getQueryParameter
-        // already URL-decodes once, which is correct here: e.g. "path" commonly carries an
-        // embedded query string itself (like "...?ed=2560" for WS early-data), and decoding
-        // it twice would corrupt it.
-        val wsPath = uri.getQueryParameter("path")
-        val wsHost = uri.getQueryParameter("host")
-
-        // Extract Fragment parameters if specified in link
-        val fragmentEnabled = uri.getQueryParameter("fragment") == "1" || uri.getQueryParameter("fragmentEnabled") == "true"
-        val fragmentLength = uri.getQueryParameter("fragmentLength") ?: "10-20"
-        val fragmentInterval = uri.getQueryParameter("fragmentInterval") ?: "10-20"
-        val fragmentPackets = uri.getQueryParameter("fragmentPackets") ?: "tlshello"
-
-        return VpnConfig(
-            name = name,
-            type = type,
-            address = host ?: "127.0.0.1",
-            port = port,
-            rawLink = link,
-            uuid = uuid,
-            password = password,
-            method = ssMethod,
-            network = network,
-            security = security,
-            flow = flow,
-            sni = sni,
-            publicKey = publicKey,
-            shortId = shortId,
-            wsPath = wsPath,
-            wsHost = wsHost,
-            fragmentEnabled = fragmentEnabled,
-            fragmentLength = fragmentLength,
-            fragmentInterval = fragmentInterval,
-            fragmentPackets = fragmentPackets
-        )
-    }
-}
+        val name = run {
+            // اول fragment Uri را ترجیح بده، اگر نبود از manualFragment
+            
