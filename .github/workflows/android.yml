@@ -36,31 +36,48 @@ jobs:
         run: |
           sdkmanager --install "ndk;26.1.10909125"
 
-      - name: Build hev-socks5-tunnel (native libraries)
+      - name: Initialize hev-socks5-tunnel submodules
+        shell: bash
+        run: |
+          cd app/src/main/jni/hev-socks5-tunnel
+          git submodule update --init --recursive
+
+      - name: Build hev-socks5-tunnel native libraries
         shell: bash
         run: |
           set -euo pipefail
           NDK_PATH="/usr/local/lib/android/sdk/ndk/26.1.10909125"
+          TOOLCHAIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64"
           JNI_DIR="${GITHUB_WORKSPACE}/app/src/main/jni"
+          HEV_DIR="${JNI_DIR}/hev-socks5-tunnel"
           
-          # Clone hev-socks5-tunnel if not present
-          if [ ! -d "${JNI_DIR}/hev-socks5-tunnel" ]; then
-            git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git "${JNI_DIR}/hev-socks5-tunnel"
-          fi
-          
-          cd "${JNI_DIR}/hev-socks5-tunnel"
-          
-          # Build for all ABIs
+          # Build for each ABI using the project's Makefile
           for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
             echo "Building for ${ABI}..."
+            
+            case ${ABI} in
+              arm64-v8a)
+                TARGET="aarch64-linux-android24"
+                ;;
+              armeabi-v7a)
+                TARGET="armv7a-linux-androideabi24"
+                ;;
+              x86)
+                TARGET="i686-linux-android24"
+                ;;
+              x86_64)
+                TARGET="x86_64-linux-android24"
+                ;;
+            esac
+            
+            cd "${HEV_DIR}"
             make clean
-            make \
-              CC="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" \
-              AR="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" \
-              STRIP="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            make static \
+              CC="${TOOLCHAIN}/bin/${TARGET}-clang" \
+              AR="${TOOLCHAIN}/bin/llvm-ar" \
+              STRIP="${TOOLCHAIN}/bin/llvm-strip" \
               CFLAGS="-O2 -fPIC" \
-              LDFLAGS="-shared" \
-              ABI="${ABI}"
+              ENABLE_STATIC=1
             
             # Copy built .a files to prebuilt/${ABI}/
             mkdir -p "${JNI_DIR}/prebuilt/${ABI}"
