@@ -25,15 +25,14 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          ndk-version: 26.1.10909125
+          packages: tools platform-tools
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
-
-      - name: Install NDK + accept licenses
-        shell: bash
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager --install "ndk;26.1.10909125"
 
       - name: Build Debug APK
         run: ./gradlew clean assembleDebug --stacktrace
