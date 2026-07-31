@@ -15,25 +15,11 @@ import com.example.data.VpnConfig
 import com.example.vpn.HevSocks5Tunnel
 import com.example.vpn.VpnConnectionManager
 import com.example.vpn.VpnStatus
-import com.example.service.XrayConfigGenerator
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * سرویس اصلی VPN — بهینه‌شده برای فیلترینگ ایران.
- *
- * معماری:
- *   TUN fd  ──(hev-socks5-tunnel)──▶  SOCKS5 (127.0.0.1:10808)  ──(Xray-core)──▶  سرور فیلترشکن
- *
- * بهینه‌سازی‌های ایران:
- *   - Fragment: شکستن TLS Hello برای فرار از DPI
- *   - Reality/XTLS: تقلید ترافیک از سایت‌های معروف
- *   - DNS رمزنگاری‌شده (DoH): جلوگیری از DNS Poisoning
- *   - Socket protect(): جلوگیری از loopback loop
- *   - Mux: ترکیب اتصالات برای مقابله با Throttling
- */
 class XrayVpnService : VpnService() {
 
     companion object {
@@ -46,84 +32,56 @@ class XrayVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "cf_vpn_channel"
         private const val NOTIFICATION_ID = 1001
 
-        // تنظیمات TUN — باید با tunnel_config.yaml هماهنگ باشد
         private const val TUN_ADDRESS = "172.19.0.1"
         private const val TUN_PREFIX_LENGTH = 30
         private const val TUN_MTU = 1400
         private const val TUN_DNS = "1.1.1.1"
         private const val TUN_SESSION_NAME = "CF-VPN"
 
-        // ── Xray Core JNI Bridge ──
-        // libv2ray.aar (2dust/AndroidLibXrayLite)
-        //   v26+: libv2ray.Libv2ray → newCoreController(config, cb) → startLoop/stopLoop
-        //   قدیمی‌تر: io.coreny.v2ray.Libv2ray → runV2Ray(String) / stopV2Ray()
-        // libXray.aar (XTLS/libXray) → xray.lib.Xray → runV2Ray / stopV2Ray
-        private var xrayController: Any? = null
-        private var xrayStartMethod: java.lang.reflect.Method? = null
+        private var xrayRunMethod: java.lang.reflect.Method? = null
         private var xrayStopMethod: java.lang.reflect.Method? = null
-        private var xrayNewControllerMethod: java.lang.reflect.Method? = null
-        private var xrayCallbackHandlerClass: Class<*>? = null
-        private var xrayDebugInfo: String? = null
 
         init {
-            // ── Step 0: Load native library FIRST (gobind requires it) ──
-            try {
-                System.loadLibrary("gojni")
-                Log.i(TAG, "Native library gojni loaded OK")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "FAILED to load gojni: ${e.message}")
-                xrayDebugInfo = "gojni load failed: ${e.message}"
-            }
+            val candidates = listOf(
+                "libv2ray.Libv2ray",
+                "io.coreny.v2ray.Libv2ray",
+                "io.coreny.Libv2ray",
+                "xray.lib.Xray",
+                "xray.lib.Libv2ray"
+            )
 
-            // ── Strategy 1: v26+ API ──
-            try {
-                val clazz = Class.forName("libv2ray.Libv2ray")
-                val callbackClass = Class.forName("libv2ray.CoreCallbackHandler")
-                val controllerClass = Class.forName("libv2ray.CoreController")
-                val newCtrl = clazz.getMethod("newCoreController", String::class.java, callbackClass)
-                val startLoop = controllerClass.getMethod("startLoop")
-                val stopLoop = controllerClass.getMethod("stopLoop")
-                xrayNewControllerMethod = newCtrl
-                xrayStartMethod = startLoop
-                xrayStopMethod = stopLoop
-                xrayCallbackHandlerClass = callbackClass
-                Log.i(TAG, "Xray AAR v26+ loaded OK")
-            } catch (e: Exception) {
-                Log.w(TAG, "v26 API failed: ${e.cause?.javaClass?.simpleName ?: e.javaClass.simpleName}: ${e.cause?.message ?: e.message}")
-                // ── Strategy 2: Legacy API ──
-                for (name in listOf("io.coreny.v2ray.Libv2ray", "io.coreny.Libv2ray", "xray.lib.Xray", "xray.lib.Libv2ray")) {
-                    try {
-                        val clazz = Class.forName(name)
-                        xrayStartMethod = clazz.getMethod("runV2Ray", String::class.java)
-                        xrayStopMethod = clazz.getMethod("stopV2Ray")
-                        Log.i(TAG, "Xray AAR legacy loaded: $name")
-                        break
-                    } catch (_: Exception) { }
+            for (className in candidates) {
+                try {
+                    val clazz = Class.forName(className)
+                    val run = clazz.getMethod("runV2Ray", String::class.java)
+                    val stop = clazz.getMethod("stopV2Ray")
+                    xrayRunMethod = run
+                    xrayStopMethod = stop
+                    Log.i(TAG, "Xray AAR loaded: $className")
+                    break
+                } catch (_: ClassNotFoundException) {
+                } catch (_: NoSuchMethodException) {
                 }
             }
 
-            if (xrayStartMethod == null) {
-                Log.e(TAG, "No compatible Xray AAR found!")
-                xrayDebugInfo = "AAR classes not found. gojni loaded: ${(xrayDebugInfo == null)}"
+            if (xrayRunMethod == null) {
+                Log.w(
+                    TAG,
+                    "No compatible Xray AAR found. " +
+                        "Tried: ${candidates.joinToString()}. " +
+                        "Place libv2ray.aar or libXray.aar in app/libs/."
+                )
             }
         }
-
-        fun getDebugInfo(): String? = xrayDebugInfo
     }
 
-    // ── وضعیت داخلی ──
     private var tunInterface: ParcelFileDescriptor? = null
     private var tunnelThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
     private lateinit var xrayConfigFile: File
     private lateinit var tunnelConfigFile: File
 
-    // ── فایل کانفیگ Xray (برای protect کردن سوکت‌ها) ──
     private var currentConfig: VpnConfig? = null
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // چرخه حیات سرویس
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -133,7 +91,6 @@ class XrayVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_START -> {
-                // دریافت کانفیگ از طریق JSON
                 val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON)
                 if (configJson == null) {
                     Log.e(TAG, "EXTRA_CONFIG_JSON is null; stopping service.")
@@ -148,7 +105,6 @@ class XrayVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
 
-                // Foreground service (الزام اندروید ۸+)
                 startForeground(NOTIFICATION_ID, buildNotification())
                 startVpn(config)
                 return START_STICKY
@@ -171,10 +127,6 @@ class XrayVpnService : VpnService() {
         super.onDestroy()
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // راه‌اندازی VPN
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
     private fun startVpn(config: VpnConfig) {
         if (isRunning.get()) {
             Log.w(TAG, "Service already running; duplicate request ignored.")
@@ -182,31 +134,19 @@ class XrayVpnService : VpnService() {
         }
 
         currentConfig = config
-        val logManager = VpnConnectionManager.getInstance(this)
 
         try {
-            // ── مرحله ۱: تولید کانفیگ Xray (بهینه‌شده برای ایران) ──
-            logManager.log("Step 1/5: Generating Xray config...")
             xrayConfigFile = File(cacheDir, "xray_config.json")
             val xrayConfigJson = XrayConfigGenerator.generate(config, filesDir)
             xrayConfigFile.writeText(xrayConfigJson)
             Log.d(TAG, "Xray config written to ${xrayConfigFile.absolutePath}")
 
-            // ── مرحله ۲: استارت هسته Xray ──
-            logManager.log("Step 2/5: Starting Xray-core...")
             startXrayCore(xrayConfigFile)
 
-            // ── مرحله ۳: ساخت TUN interface ──
-            logManager.log("Step 3/5: Creating TUN interface...")
             val establishedFd = establishTunInterface()
-                ?: throw IllegalStateException(
-                    "TUN establish() returned null — VPN permission not granted " +
-                    "or Builder configuration is invalid."
-                )
+                ?: throw IllegalStateException("TUN establish() returned null")
             tunInterface = establishedFd
 
-            // ── مرحله ۴: نوشتن کانفیگ YAML برای hev-socks5-tunnel ──
-            logManager.log("Step 4/5: Writing tunnel config...")
             tunnelConfigFile = File(cacheDir, "tunnel_config.yaml")
             HevSocks5Tunnel.writeConfig(
                 destFile = tunnelConfigFile,
@@ -214,8 +154,6 @@ class XrayVpnService : VpnService() {
                 socksPort = XrayConfigGenerator.SOCKS_INBOUND_PORT
             )
 
-            // ── مرحله ۵: اجرای hev-socks5-tunnel (ترد بلاکینگ) ──
-            logManager.log("Step 5/5: Starting hev-socks5-tunnel...")
             tunnelThread = Thread({
                 try {
                     Log.i(TAG, "hev-socks5-tunnel thread started.")
@@ -234,63 +172,31 @@ class XrayVpnService : VpnService() {
             }
 
             isRunning.set(true)
-            // اطلاع‌رسانی وضعیت به UI
             VpnConnectionManager.getInstance(this).setStatus(VpnStatus.CONNECTED)
             Log.i(TAG, "XrayVpnService started successfully for: ${config.name} (${config.type})")
         } catch (e: Exception) {
-            val errorMsg = "VPN Error: ${e.message ?: e.javaClass.simpleName}"
-            Log.e(TAG, errorMsg, e)
-            VpnConnectionManager.getInstance(this).log(errorMsg)
+            Log.e(TAG, "Error starting VPN: ${e.message}", e)
             cleanupAfterFailure()
             stopSelf()
         }
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // TUN Interface — با protect() برای جلوگیری از Loop
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
     private fun establishTunInterface(): ParcelFileDescriptor? {
         val builder = Builder()
-            .setSession(TUN_SESSION_NAME)
-            .setMtu(TUN_MTU)
-            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)
-            .addDnsServer(TUN_DNS)
-            // هدایت تمام ترافیک IPv4 به داخل تونل
-            .addRoute("0.0.0.0", 0)
-            // IPv6 فعال نمی‌شود (بسیاری از سرورهای VPN از IPv6 پشتیبانی نمی‌کنند
-            // و فعال کردن آن ممکن است نشت IPv6 ایجاد کند)
-            // .addRoute("::", 0)
-
-            // ── Split Tunneling ──
-            // خود اپلیکیشن باید از تونل خارج باشد تا loop ایجاد نشود.
-            // اگر از protect() استفاده می‌کنیم، نیازی به addDisallowedApplication نیست
-            // ولی به عنوان لایه اضافی ایمنی اضافه می‌کنیم:
-            .addDisallowedApplication("com.aistudio.vpnclient.xdvryu")
+           .setSession(TUN_SESSION_NAME)
+           .setMtu(TUN_MTU)
+           .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)
+           .addDnsServer(TUN_DNS)
+           .addRoute("0.0.0.0", 0)
+           .addDisallowedApplication(packageName)
 
         return builder.establish()
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // محافظت از سوکت خروجی (جلوگیری از Loopback Loop)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /**
-     * این متد باید از طریق JNI callback توسط Xray-core فراخوانی شود.
-     *
-     * اگر سوکت خروجی Xray protect نشود:
-     *   → بسته‌ها وارد TUN می‌شوند
-     *   → دوباره به Xray برمی‌گردند
-     *   → loop بی‌نهایت → قطعی اینترنت + مصرف CPU
-     *
-     * این متد توسط native layer فراخوانی می‌شود.
-     */
     fun protectSocket(socketFd: Int): Boolean {
         return try {
             val result = protect(socketFd)
-            if (!result) {
-                Log.w(TAG, "protect() failed for fd=$socketFd")
-            }
+            if (!result) Log.w(TAG, "protect() failed for fd=$socketFd")
             result
         } catch (e: Exception) {
             Log.e(TAG, "Error protecting socket: ${e.message}", e)
@@ -298,71 +204,29 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Xray Core — مدیریت از طریق libv2ray.aar / JNI
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /**
-     * شروع هسته Xray با فایل کانفیگ.
-     * پشتیبانی از هر دو API: v26+ (newCoreController) و قدیمی‌تر (runV2Ray).
-     */
     private fun startXrayCore(configFile: File) {
         if (!configFile.exists()) {
             throw IllegalStateException("Xray config file not found: ${configFile.absolutePath}")
         }
 
-        val configJson = configFile.readText()
-        val startMethod = xrayStartMethod
-        if (startMethod == null) {
-            val debug = getDebugInfo() ?: "unknown"
-            throw IllegalStateException(
-                "Xray AAR not loaded. $debug"
+        val runMethod = xrayRunMethod
+            ?: throw IllegalStateException(
+                "libv2ray.aar is not available. Place libv2ray.aar (or libXray.aar) in app/libs/."
             )
-        }
 
         try {
             Log.i(TAG, "Starting Xray-core with config: ${configFile.absolutePath}")
-
-            if (xrayNewControllerMethod != null && xrayCallbackHandlerClass != null) {
-                // ── v26+ API: newCoreController → startLoop ──
-                // ایجاد callback handler ساده
-                val callbackHandler = createMinimalCallbackHandler()
-                val controller = xrayNewControllerMethod!!.invoke(
-                    null, configJson, callbackHandler
-                )
-                xrayController = controller
-                startMethod.invoke(controller)
-                Log.i(TAG, "Xray-core started (v26+ API).")
-            } else {
-                // ── Legacy API: runV2Ray(String) ──
-                val errorMsg = startMethod.invoke(null, configJson) as? String
-                if (!errorMsg.isNullOrEmpty()) {
-                    throw IllegalStateException("Xray-core returned error: $errorMsg")
-                }
-                Log.i(TAG, "Xray-core started (legacy API).")
+            val errorMsg = runMethod.invoke(null, configFile.absolutePath) as? String
+            if (!errorMsg.isNullOrEmpty()) {
+                throw IllegalStateException("Xray-core returned error: $errorMsg")
             }
+            Log.i(TAG, "Xray-core started successfully.")
         } catch (e: java.lang.reflect.InvocationTargetException) {
             val cause = e.cause ?: e
             throw IllegalStateException("Xray-core JNI call failed: ${cause.message}", cause)
         }
     }
 
-    /**
-     * ایجاد یک callback handler ساده برای v26+ API.
-     * CoreCallbackHandler یک کلاس abstract هست که باید متدهاش رو override کنیم.
-     */
-    private fun createMinimalCallbackHandler(): Any {
-        val handlerClass = xrayCallbackHandlerClass!!
-        // CoreCallbackHandler یک GoObject proxy هست، مستقیماً میسازیمش
-        // با reflection یک نمونه خالی بسازیم
-        val constructor = handlerClass.getDeclaredConstructor()
-        constructor.isAccessible = true
-        return constructor.newInstance()
-    }
-
-    /**
-     * توقف هسته Xray.
-     */
     private fun stopXrayCore() {
         val stopMethod = xrayStopMethod
         if (stopMethod == null) {
@@ -372,30 +236,13 @@ class XrayVpnService : VpnService() {
 
         try {
             Log.i(TAG, "Stopping Xray-core...")
-            if (xrayController != null) {
-                stopMethod.invoke(xrayController)
-                xrayController = null
-            } else {
-                stopMethod.invoke(null)
-            }
+            stopMethod.invoke(null)
             Log.i(TAG, "Xray-core stopped.")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping Xray-core: ${e.message}", e)
         }
     }
 
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // توقف و پاک‌سازی — ترتیب بسیار مهم است!
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    /**
-     * ترتیب بستن منابع (معکوسِ ترتیب باز کردن):
-     *   ۱) hev-socks5-tunnel را متوقف → دیگر از fd استفاده نکند
-     *   ۲) ParcelFileDescriptor تونل را ببندیم
-     *   ۳) Xray-core را متوقف کنیم
-     *
-     * اگر ترتیب رعایت نشود → native crash (SIGSEGV)
-     */
     private fun stopVpn() {
         if (!isRunning.getAndSet(false)) {
             Log.d(TAG, "stopVpn called but service was already stopped.")
@@ -403,42 +250,17 @@ class XrayVpnService : VpnService() {
         }
 
         Log.i(TAG, "Stopping VPN safely...")
-        // اطلاع‌رسانی وضعیت به UI
         VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED)
 
-        // مرحله ۱: توقف hev-socks5-tunnel
-        try {
-            HevSocks5Tunnel.stop()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping hev-socks5-tunnel: ${e.message}", e)
-        }
-
-        // منتظر برگشت ترد تونل (حداکثر ۲ ثانیه)
-        try {
-            tunnelThread?.join(2000)
-        } catch (e: InterruptedException) {
-            Log.w(TAG, "tunnel thread join interrupted: ${e.message}")
-            Thread.currentThread().interrupt()
-        }
+        runCatching { HevSocks5Tunnel.stop() }
+        runCatching { tunnelThread?.join(2000) }
         tunnelThread = null
 
-        // مرحله ۲: بستن TUN interface
-        try {
-            tunInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing TUN ParcelFileDescriptor: ${e.message}", e)
-        } finally {
-            tunInterface = null
-        }
+        runCatching { tunInterface?.close() }
+        tunInterface = null
 
-        // مرحله ۳: توقف Xray-core
-        try {
-            stopXrayCore()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping Xray-core: ${e.message}", e)
-        }
+        runCatching { stopXrayCore() }
 
-        // پاک‌سازی فایل‌های موقت
         runCatching { if (::xrayConfigFile.isInitialized) xrayConfigFile.delete() }
         runCatching { if (::tunnelConfigFile.isInitialized) tunnelConfigFile.delete() }
 
@@ -450,9 +272,6 @@ class XrayVpnService : VpnService() {
         Log.i(TAG, "VPN stopped successfully.")
     }
 
-    /**
-     * پاک‌سازی در حالت خطا (قبل از isRunning=true).
-     */
     private fun cleanupAfterFailure() {
         runCatching { tunnelThread?.interrupt() }
         tunnelThread = null
@@ -461,14 +280,9 @@ class XrayVpnService : VpnService() {
         tunInterface = null
         runCatching { stopXrayCore() }
         isRunning.set(false)
-        // اطلاع‌رسانی وضعیت به UI
         runCatching { VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED) }
         currentConfig = null
     }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Notification
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     private fun buildNotification(): Notification {
         createNotificationChannelIfNeeded()
@@ -485,17 +299,17 @@ class XrayVpnService : VpnService() {
         val protocolName = currentConfig?.type?.uppercase() ?: ""
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("🛡️ CF-VPN فعال است")
-            .setContentText("$protocolName | $configName")
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(
+           .setContentTitle("CF-VPN Active")
+           .setContentText("$protocolName | $configName")
+           .setSmallIcon(android.R.drawable.ic_lock_lock)
+           .setOngoing(true)
+           .setPriority(NotificationCompat.PRIORITY_LOW)
+           .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
-                "قطع اتصال",
+                "Disconnect",
                 stopPendingIntent
             )
-            .build()
+           .build()
     }
 
     private fun createNotificationChannelIfNeeded() {
@@ -504,20 +318,16 @@ class XrayVpnService : VpnService() {
             if (manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
                 val channel = NotificationChannel(
                     NOTIFICATION_CHANNEL_ID,
-                    "اتصال VPN",
+                    "VPN Connection",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "وضعیت اتصال VPN"
+                    description = "VPN connection status"
                     setShowBadge(false)
                 }
                 manager.createNotificationChannel(channel)
             }
         }
     }
-
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Helper: Parse VpnConfig from JSON
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     private fun parseConfig(json: String): VpnConfig? {
         return try {
