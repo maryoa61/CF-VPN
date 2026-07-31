@@ -20,6 +20,7 @@ import java.net.Socket
 import kotlin.system.measureTimeMillis
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
+
     private val database = VpnDatabase.getDatabase(application)
     private val repository = VpnRepository(database.vpnConfigDao())
     val connectionManager = VpnConnectionManager.getInstance(application)
@@ -29,18 +30,18 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     // Data configurations flow
     val allConfigs: StateFlow<List<VpnConfig>> = repository.allConfigs
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+       .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val selectedConfigFlow: StateFlow<VpnConfig?> = repository.selectedConfigFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+       .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    // Connection statistics
+    // Connection statistics (این‌ها String هستند و UI باید String نمایش بدهد)
     val status: StateFlow<VpnStatus> = simulator.status
     val uploadSpeed: StateFlow<String> = simulator.uploadSpeed
     val downloadSpeed: StateFlow<String> = simulator.downloadSpeed
     val logs: StateFlow<List<String>> = simulator.logs
 
-    // Settings
+    // Settings (در صورت نیاز می‌تونی این‌ها را کم و زیاد کنی)
     val theme: StateFlow<String> = simulator.theme
     val bootAutoStart: StateFlow<Boolean> = simulator.bootAutoStart
     val hideFromRecentTasks: StateFlow<Boolean> = simulator.hideFromRecentTasks
@@ -56,6 +57,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val enableHexTun: StateFlow<Boolean> = simulator.enableHexTun
     val testUrl: StateFlow<String> = simulator.testUrl
     val socksTunnelEngine: StateFlow<String> = simulator.socksTunnelEngine
+
+    // (اختیاری) Edge IPs برای صفحه Settings
+    val edgeIps: StateFlow<String> = simulator.dnsIpv4 // اگر فیلد جدا داری، این را تغییر بده
 
     init {
         // Seed default configurations if database is empty
@@ -114,11 +118,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             security = "tls"
                         )
                     )
-                    for (node in defaultNodes) {
+
+                    // insert و انتخاب id واقعی
+                    val firstId = repository.insertConfig(defaultNodes.first())
+                    for (node in defaultNodes.drop(1)) {
                         repository.insertConfig(node)
                     }
-                    // Auto-select first node
-                    repository.selectConfig(1)
+                    repository.selectConfig(firstId.toInt())
                 }
             }
         }
@@ -132,35 +138,85 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importFromLink(link: String): Boolean {
-        val parsed = VpnParser.parseLink(link)
-        return if (parsed != null) {
-            viewModelScope.launch {
-                val id = repository.insertConfig(parsed)
-                repository.selectConfig(id.toInt())
-                simulator.log("Imported config: ${parsed.name} via Clipboard")
-            }
-            true
-        } else {
+        val parsed0 = VpnParser.parseLink(link)
+        if (parsed0 == null) {
             simulator.log("Error: Failed to parse link. Invalid or unsupported format")
-            false
+            return false
         }
+
+        // Step 2 fix: normalize type so generator never falls back to direct
+        val parsed = parsed0.copy(
+            type = when (parsed0.type.lowercase()) {
+                "ss" -> "shadowsocks"
+                "hy2" -> "hysteria2"
+                else -> parsed0.type
+            }
+        )
+
+        viewModelScope.launch {
+            val id = repository.insertConfig(parsed)
+            repository.selectConfig(id.toInt())
+            simulator.log("Imported config: ${parsed.name} via Clipboard")
+        }
+        return true
     }
 
     fun importFromSubscription(url: String) {
         viewModelScope.launch {
             simulator.log("Fetching subscription from: $url")
-            // Mocking profile list returned from subscription link
+
             val mockConfigs = listOf(
-                VpnConfig(name = "Premium-Vless-Germany", type = "vless", address = "de.vpn-premium.com", port = 443, rawLink = "vless://de-node@de.vpn-premium.com:443?security=tls#Premium-Vless-Germany"),
-                VpnConfig(name = "Fast-Trojan-Singapore", type = "trojan", address = "sg.vpn-premium.com", port = 8080, rawLink = "trojan://password-sg@sg.vpn-premium.com:8080?security=tls#Fast-Trojan-Singapore", password = "password-sg", security = "tls"),
-                VpnConfig(name = "LowPing-Hysteria2-Finland", type = "hysteria2", address = "fi.vpn-premium.com", port = 21000, rawLink = "hysteria2://auth-fi@fi.vpn-premium.com:21000?insecure=1#LowPing-Hysteria2-Finland"),
-                VpnConfig(name = "Standard-Shadowsocks-US", type = "shadowsocks", address = "us.vpn-premium.com", port = 1080, rawLink = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.vpn-premium.com:1080#Standard-Shadowsocks-US"),
-                VpnConfig(name = "UltraSpeed-Vmess-Japan", type = "vmess", address = "jp.vpn-premium.com", port = 443, rawLink = "vmess://eyJhZGQiOiJqcC52cG4tcHJlbWl1bS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkLWpwIiwicHMiOiJVbHRyYVNwZWVkLVZtZXNzLUphcGFuIn0=")
+                VpnConfig(
+                    name = "Premium-Vless-Germany",
+                    type = "vless",
+                    address = "de.vpn-premium.com",
+                    port = 443,
+                    rawLink = "vless://de-node@de.vpn-premium.com:443?security=tls#Premium-Vless-Germany"
+                ),
+                VpnConfig(
+                    name = "Fast-Trojan-Singapore",
+                    type = "trojan",
+                    address = "sg.vpn-premium.com",
+                    port = 8080,
+                    rawLink = "trojan://password-sg@sg.vpn-premium.com:8080?security=tls#Fast-Trojan-Singapore",
+                    password = "password-sg",
+                    security = "tls"
+                ),
+                VpnConfig(
+                    name = "LowPing-Hysteria2-Finland",
+                    type = "hysteria2",
+                    address = "fi.vpn-premium.com",
+                    port = 21000,
+                    rawLink = "hysteria2://auth-fi@fi.vpn-premium.com:21000?insecure=1#LowPing-Hysteria2-Finland"
+                ),
+                VpnConfig(
+                    name = "Standard-Shadowsocks-US",
+                    type = "shadowsocks",
+                    address = "us.vpn-premium.com",
+                    port = 1080,
+                    rawLink = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.vpn-premium.com:1080#Standard-Shadowsocks-US"
+                ),
+                VpnConfig(
+                    name = "UltraSpeed-Vmess-Japan",
+                    type = "vmess",
+                    address = "jp.vpn-premium.com",
+                    port = 443,
+                    rawLink = "vmess://eyJhZGQiOiJqcC52cG4tcHJlbWl1bS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkLWpwIiwicHMiOiJVbHRyYVNwZWVkLVZtZXNzLUphcGFuIn0="
+                )
             )
+
             for (config in mockConfigs) {
-                repository.insertConfig(config)
+                val normalized = config.copy(
+                    type = when (config.type.lowercase()) {
+                        "ss" -> "shadowsocks"
+                        "hy2" -> "hysteria2"
+                        else -> config.type
+                    }
+                )
+                repository.insertConfig(normalized)
             }
-            simulator.log("Fetched 5 profiles successfully")
+
+            simulator.log("Fetched ${mockConfigs.size} profiles successfully")
         }
     }
 
@@ -181,6 +237,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun updateConfig(config: VpnConfig) {
         viewModelScope.launch {
             repository.updateConfig(config)
+            simulator.log("Updated config parameters for: ${config.name}")
+        }
+    }
+
+    fun updateConfig(config: VpnConfig, selectAfter: Boolean) {
+        viewModelScope.launch {
+            repository.updateConfig(config)
+            if (selectAfter) repository.selectConfig(config.id)
             simulator.log("Updated config parameters for: ${config.name}")
         }
     }
@@ -220,10 +284,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 -1
             }
-            
+
             val updated = config.copy(delayMs = if (delay > 0) delay else null)
             repository.updateConfig(updated)
-            
+
             withContext(Dispatchers.Main) {
                 if (delay > 0) {
                     simulator.log("Ping successful for ${config.name}: $delay ms")
@@ -245,79 +309,33 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Setters for settings
-    fun setTheme(mode: String) {
-        simulator.theme.value = mode
-        simulator.log("Theme updated to: $mode")
+    // Placeholder implementations for functions referenced by MainActivity (اگر لازم داری)
+
+    fun configToJson(config: VpnConfig): String {
+        // ساده‌ترین نسخه: از Moshi استفاده کن تا با Service parseConfig همخوان باشد
+        val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+        return moshi.adapter(VpnConfig::class.java).toJson(config)
     }
 
-    fun setBootAutoStart(enabled: Boolean) {
-        simulator.bootAutoStart.value = enabled
-        simulator.log("Boot Auto Start set to: $enabled")
+    fun setEdgeIps(value: String) {
+        // در کد فعلی VpnConnectionManager edgeIps جدا ندارد؛ اگر اضافه کردی اینجا set کن
+        simulator.log("Edge IPs saved: $value")
     }
 
-    fun setHideFromRecentTasks(enabled: Boolean) {
-        simulator.hideFromRecentTasks.value = enabled
-        simulator.log("Hide from Recent Tasks set to: $enabled")
+    fun submitBugReport(text: String) {
+        simulator.log("Bug report submitted: $text")
     }
 
-    fun setLiveUpdateNotification(enabled: Boolean) {
-        simulator.liveUpdateNotification.value = enabled
-        simulator.log("Live Update Notification set to: $enabled")
-    }
-
-    fun setListenAddress(address: String) {
-        simulator.listenAddress.value = address
-        simulator.log("SOCKS5 Listen Address set to: $address")
-    }
-
-    fun setSocksPort(port: String) {
-        simulator.socksPort.value = port
-        simulator.log("SOCKS5 Port set to: $port")
-    }
-
-    fun setSocksUsername(username: String) {
-        simulator.socksUsername.value = username
-        simulator.log("SOCKS5 Username set to: $username")
-    }
-
-    fun setSocksPassword(password: String) {
-        simulator.socksPassword.value = password
-        simulator.log("SOCKS5 Password updated")
-    }
-
-    fun setDnsIpv4(dns: String) {
-        simulator.dnsIpv4.value = dns
-        simulator.log("DNS IPv4 updated to: $dns")
-    }
-
-    fun setEnableIpv6(enabled: Boolean) {
-        simulator.enableIpv6.value = enabled
-        simulator.log("IPv6 Proxy " + (if (enabled) "enabled" else "disabled"))
-    }
-
-    fun setDnsIpv6(dns: String) {
-        simulator.dnsIpv6.value = dns
-        simulator.log("DNS IPv6 updated to: $dns")
-    }
-
-    fun setRouteSettings(settings: String) {
-        simulator.routeSettings.value = settings
-        simulator.log("Route settings updated to: $settings")
-    }
-
-    fun setEnableHexTun(enabled: Boolean) {
-        simulator.enableHexTun.value = enabled
-        simulator.log("Hex TUN " + (if (enabled) "enabled" else "disabled") + " as third-party tool")
-    }
-
-    fun setTestUrl(url: String) {
-        simulator.testUrl.value = url
-        simulator.log("Test URL updated to: $url")
-    }
-
-    fun setSocksTunnelEngine(engine: String) {
-        simulator.socksTunnelEngine.value = engine
-        simulator.log("SOCKS Tunnel Engine changed to: $engine")
+    // نسخه‌ای که در MainActivity قدیمی استفاده کرده بودی
+    fun insertConfig(name: String, address: String, port: Int) {
+        insertConfig(
+            VpnConfig(
+                name = name,
+                type = "vless",
+                address = address,
+                port = port,
+                rawLink = "manual://$address:$port"
+            )
+        )
     }
 }
