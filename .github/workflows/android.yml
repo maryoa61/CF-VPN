@@ -27,16 +27,16 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Make gradlew executable
-        run: chmod +x./gradlew
+        run: chmod +x ./gradlew
 
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses
-
-      - name: Install NDK
-        run: sdkmanager --install "ndk;26.1.10909125"
+      - name: Install NDK + accept licenses
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "ndk;26.1.10909125"
 
       - name: Build Debug APK
-        run:./gradlew clean assembleDebug --stacktrace
+        run: ./gradlew clean assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
