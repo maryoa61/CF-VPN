@@ -77,7 +77,9 @@ object XrayConfigGenerator {
             }
         }
         json.put("outbounds", JSONArray().apply {
-            proxyOutbounds.forEach { put(it) }
+            for (i in 0 until proxyOutbounds.length()) {
+                put(proxyOutbounds.get(i))
+            }
             put(directOutbound)
             put(blockOutbound)
         })
