@@ -1,6 +1,7 @@
 package com.example
 // Sync trigger comment for GitHub
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -9,8 +10,10 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,6 +62,8 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.vpn.VpnStatus
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import kotlinx.coroutines.delay
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -347,6 +352,21 @@ fun ConfigScreen(
     val configs by viewModel.allConfigs.collectAsStateWithLifecycle()
     val selectedConfig by viewModel.selectedConfigFlow.collectAsStateWithLifecycle()
 
+    val qrScannerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val scanResult = result.data?.getStringExtra("SCAN_RESULT")
+            if (!scanResult.isNullOrEmpty()) {
+                if (viewModel.importFromLink(scanResult)) {
+                    Toast.makeText(context, "QR code config imported!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Failed to parse QR config link", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     var showAddMenu by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showSubscriptionDialog by remember { mutableStateOf(false) }
@@ -354,7 +374,7 @@ fun ConfigScreen(
     var showEditDialog by remember { mutableStateOf(false) }
     var editingConfig by remember { mutableStateOf<VpnConfig?>(null) }
     var inputLink by remember { mutableStateOf("") }
-    var inputSubUrl by remember { mutableStateOf("https://premium-vpn.com/get-sub") }
+    var inputSubUrl by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -475,11 +495,18 @@ fun ConfigScreen(
                         leadingIcon = { Icon(Icons.Default.QrCode, contentDescription = null) },
                         onClick = {
                             showAddMenu = false
-                            // Simulating a QR code scan
-                            viewModel.simulator.log("Scanning QR Code...")
-                            val mockQrLink = "vless://qr-scanned-node@91.200.12.3:443?security=tls#QR_Imported_Node"
-                            if (viewModel.importFromLink(mockQrLink)) {
-                                Toast.makeText(context, "QR code config imported!", Toast.LENGTH_SHORT).show()
+                            try {
+                                val scanIntent = Intent("com.google.zxing.client.android.SCAN").apply {
+                                    putExtra("SCAN_MODE", "QR_CODE_MODE")
+                                }
+                                qrScannerLauncher.launch(scanIntent)
+                            } catch (e: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "QR scanner app not installed — paste the link instead",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                showImportDialog = true
                             }
                         }
                     )
@@ -1197,6 +1224,20 @@ fun ConfigItemRow(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.06f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete Configuration",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }
@@ -1215,6 +1256,20 @@ fun HomeScreen(
     val logs by viewModel.logs.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
+
+    // تایمر واقعی مدت اتصال (به‌جای مقدار سخت‌کدشده)
+    var elapsedSeconds by remember { mutableStateOf(0L) }
+    LaunchedEffect(status) {
+        if (status == VpnStatus.CONNECTED) {
+            val startTime = SystemClock.elapsedRealtime()
+            while (isActive) {
+                elapsedSeconds = (SystemClock.elapsedRealtime() - startTime) / 1000
+                delay(1000)
+            }
+        } else {
+            elapsedSeconds = 0
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1311,7 +1366,7 @@ fun HomeScreen(
 
             // Timer display or status state
             Text(
-                text = if (isConnected) "00:42:19" else "00:00:00",
+                text = if (isConnected || isConnecting) formatDuration(elapsedSeconds) else "00:00:00",
                 fontSize = 36.sp,
                 fontWeight = FontWeight.Light,
                 color = MaterialTheme.colorScheme.onBackground
@@ -2659,4 +2714,11 @@ fun SettingsScreen(
             }
         )
     }
+}
+
+private fun formatDuration(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return String.format(Locale.US, "%02d:%02d:%02d", h, m, s)
 }

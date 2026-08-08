@@ -127,9 +127,6 @@ object XrayConfigGenerator {
             put("disableCache", false)
             put("disableFallback", false)
             put("disableExpire", false)
-
-            // فعال‌سازی ClientSubnet برای بهتر DNS Resolution
-            put("clientIp", "")
         }
     }
 
@@ -196,8 +193,10 @@ object XrayConfigGenerator {
                 // مگر اینکه از obfs استفاده بشه
             }
             else -> {
-                Log.w(TAG, "Unsupported protocol: ${config.type}, falling back to freedom")
-                outbound.put("protocol", "freedom")
+                Log.e(TAG, "Unsupported protocol: ${config.type}")
+                // هرگز به freedom برنگرد — نشت ترافیک مستقیم. به‌جایش خطا بده
+                // تا سرویس با لاگ واضح متوقف شود.
+                throw IllegalArgumentException("Unsupported protocol type: ${config.type}")
             }
         }
 
@@ -305,7 +304,7 @@ object XrayConfigGenerator {
                         put("fingerprint", "chrome")  // تقلید اثرانگشت Chrome
                         put("publicKey", config.publicKey ?: "")
                         put("shortId", config.shortId ?: "")
-                        put("spiderX", "")
+                        put("spiderX", "/")
                     })
                 }
                 "xtls" -> {
@@ -313,10 +312,6 @@ object XrayConfigGenerator {
                     put("xtlsSettings", JSONObject().apply {
                         put("serverName", config.sni ?: config.address)
                         put("fingerprint", "chrome")
-                        // Fragment برای XTLS — شکستن TLS Hello
-                        if (config.fragmentEnabled) {
-                            put("fragment", buildFragmentObject(config))
-                        }
                     })
                 }
                 "tls" -> {
@@ -325,15 +320,20 @@ object XrayConfigGenerator {
                         put("serverName", config.sni ?: config.address)
                         put("fingerprint", "chrome")  // تقلید Chrome
                         put("allowInsecure", false)
-                        // Fragment برای TLS — حیاتی برای DPI ایران
-                        if (config.fragmentEnabled) {
-                            put("fragment", buildFragmentObject(config))
-                        }
                     })
                 }
                 else -> {
                     put("security", "none")
                 }
+            }
+
+            // ── Fragment ──
+            // FragmentObject در Xray باید هم‌سطح tlsSettings داخل streamSettings باشد
+            // (نه داخل tlsSettings/xtlsSettings). فقط با TLS/XTLS کار می‌کند؛
+            // Reality از fragment پشتیبانی نمی‌کند.
+            val sec = config.security?.lowercase()
+            if (config.fragmentEnabled && (sec == "tls" || sec == "xtls")) {
+                put("fragment", buildFragmentObject(config))
             }
 
             // ── Transport: WebSocket ──

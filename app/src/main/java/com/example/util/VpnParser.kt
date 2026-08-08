@@ -27,7 +27,7 @@ object VpnParser {
                 if (scheme in listOf("vless", "ss", "trojan", "hysteria2", "hy2")) {
                     val host = uri.host ?: "unknown"
                     val port = if (uri.port != -1) uri.port else 443
-                    val name = uri.fragment?.let { URLDecoder.decode(it, "UTF-8") } ?: "imported_${scheme}"
+                    val name = uri.fragment ?: "imported_${scheme}"
                     VpnConfig(
                         name = name,
                         type = if (scheme == "hy2") "hysteria2" else scheme,
@@ -43,7 +43,9 @@ object VpnParser {
     }
 
     private fun parseVmess(link: String): VpnConfig? {
-        val rawBase64 = link.substring(8)
+        // برخی لینک‌ها بعد از base64 یک نام به‌صورت fragment دارند (vmess://...b64#Name).
+        // `#` در الفبای base64 نیست، پس حذفش امن است.
+        val rawBase64 = link.substring(8).substringBefore("#")
         val jsonStr = try {
             val decodedBytes = Base64.decode(rawBase64, Base64.DEFAULT)
             String(decodedBytes, StandardCharsets.UTF_8)
@@ -143,13 +145,10 @@ object VpnParser {
             }
         }
 
-        val name = uri.fragment?.let { 
-            try {
-                URLDecoder.decode(it, "UTF-8")
-            } catch (e: Exception) {
-                it
-            }
-        } ?: "${type}_node_${host.take(5)}"
+        // Fragment کامنتشده از Uri (android.net.Uri درصد-دیکد کرده) — دوباره
+        // decode کردن باعث خرابی نام‌های دارای % می‌شود.
+        val name = uri.fragment
+            ?: "${type}_node_${host.take(5)}"
 
         // Extract query parameters for VLESS, if applicable
         val uuid = if (type == "vless") userInfo else null
@@ -174,7 +173,8 @@ object VpnParser {
                 password = decoded.substring(sepIndex + 1)
             }
         }
-        val security = uri.getQueryParameter("security") ?: "none"
+        val security = uri.getQueryParameter("security")
+            ?: if (type == "trojan") "tls" else "none"
         val flow = uri.getQueryParameter("flow") ?: "none"
         val sni = uri.getQueryParameter("sni")
         val publicKey = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey")

@@ -15,8 +15,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
 import kotlin.system.measureTimeMillis
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
@@ -58,72 +60,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val socksTunnelEngine: StateFlow<String> = simulator.socksTunnelEngine
 
     init {
-        // Seed default configurations if database is empty
-        viewModelScope.launch {
-            repository.allConfigs.collect { list ->
-                if (list.isEmpty()) {
-                    val defaultNodes = listOf(
-                        VpnConfig(
-                            name = "⚡ VLESS-XTLS-Direct-IR",
-                            type = "vless",
-                            address = "ir.xray-core.com",
-                            port = 443,
-                            rawLink = "vless://93b95eb0-07bf-4fbc-bdf4-dc6fa264df7a@ir.xray-core.com:443?security=xtls&flow=xtls-rprx-vision&type=tcp#VLESS-XTLS-Direct-IR",
-                            uuid = "93b95eb0-07bf-4fbc-bdf4-dc6fa264df7a",
-                            network = "tcp",
-                            security = "xtls",
-                            flow = "xtls-rprx-vision",
-                            sni = "xtls-sni.com",
-                            fragmentEnabled = true,
-                            fragmentLength = "10-20",
-                            fragmentInterval = "10-20",
-                            fragmentPackets = "tlshello"
-                        ),
-                        VpnConfig(
-                            name = "🛡️ VLESS-Reality-Fragment-EU",
-                            type = "vless",
-                            address = "de.xray-core.com",
-                            port = 443,
-                            rawLink = "vless://4ea5d71a-b3eb-460d-8ea2-6eb6d2bc6be5@de.xray-core.com:443?security=reality&sni=google.com&pbk=pBKeyRealitySampleShortIdSid#VLESS-Reality-Fragment-EU",
-                            uuid = "4ea5d71a-b3eb-460d-8ea2-6eb6d2bc6be5",
-                            network = "tcp",
-                            security = "reality",
-                            flow = "none",
-                            sni = "google.com",
-                            publicKey = "pBKeyRealitySampleShortIdSid",
-                            shortId = "sid827a",
-                            fragmentEnabled = true,
-                            fragmentLength = "5-15",
-                            fragmentInterval = "10-20",
-                            fragmentPackets = "tlshello"
-                        ),
-                        VpnConfig(
-                            name = "🌐 VMESS-WS-Cloudflare",
-                            type = "vmess",
-                            address = "cf-cdn.com",
-                            port = 80,
-                            rawLink = "vmess://eyJhZGQiOiJjZi1jZG4uY29tIiwicG9ydCI6ODAsImlkIjoiZmNjZWVkMjMtOTFjYi00ZDIzLWJhYzUtNDIzYTc0N2RlNGY5IiwicHMiOiJWTUVTUy1XUy1DbG91ZGZsYXJlIn0="
-                        ),
-                        VpnConfig(
-                            name = "💨 Trojan-TLS-HighSpeed",
-                            type = "trojan",
-                            address = "fi.vpn-core.net",
-                            port = 443,
-                            rawLink = "trojan://pass@fi.vpn-core.net:443?security=tls#Trojan-TLS-HighSpeed",
-                            password = "pass",
-                            security = "tls"
-                        )
-                    )
-                    for (node in defaultNodes) {
-                        repository.insertConfig(node)
-                    }
-                    // Auto-select first node
-                    repository.selectConfig(1)
-                }
-            }
-        }
-
         // Sync selected config from local DB to the simulator
+        // (کانفیگ‌های دمو عمداً seed نمی‌شوند — دیتابیس خالی شروع می‌شود.)
         viewModelScope.launch {
             repository.selectedConfigFlow.collect { config ->
                 simulator.selectConfig(config)
@@ -149,19 +87,46 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun importFromSubscription(url: String) {
         viewModelScope.launch {
             simulator.log("Fetching subscription from: $url")
-            // Mocking profile list returned from subscription link
-            val mockConfigs = listOf(
-                VpnConfig(name = "Premium-Vless-Germany", type = "vless", address = "de.vpn-premium.com", port = 443, rawLink = "vless://de-node@de.vpn-premium.com:443?security=tls#Premium-Vless-Germany"),
-                VpnConfig(name = "Fast-Trojan-Singapore", type = "trojan", address = "sg.vpn-premium.com", port = 8080, rawLink = "trojan://password-sg@sg.vpn-premium.com:8080?security=tls#Fast-Trojan-Singapore", password = "password-sg", security = "tls"),
-                VpnConfig(name = "LowPing-Hysteria2-Finland", type = "hysteria2", address = "fi.vpn-premium.com", port = 21000, rawLink = "hysteria2://auth-fi@fi.vpn-premium.com:21000?insecure=1#LowPing-Hysteria2-Finland"),
-                VpnConfig(name = "Standard-Shadowsocks-US", type = "shadowsocks", address = "us.vpn-premium.com", port = 1080, rawLink = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.vpn-premium.com:1080#Standard-Shadowsocks-US"),
-                VpnConfig(name = "UltraSpeed-Vmess-Japan", type = "vmess", address = "jp.vpn-premium.com", port = 443, rawLink = "vmess://eyJhZGQiOiJqcC52cG4tcHJlbWl1bS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJ1dWlkLWpwIiwicHMiOiJVbHRyYVNwZWVkLVZtZXNzLUphcGFuIn0=")
-            )
-            for (config in mockConfigs) {
-                repository.insertConfig(config)
+            try {
+                val body = withContext(Dispatchers.IO) { fetchUrl(url) }
+                val plain = decodeBase64IfNeeded(body)
+                val lines = plain.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }
+                var count = 0
+                for (link in lines) {
+                    val parsed = VpnParser.parseLink(link)
+                    if (parsed != null) {
+                        repository.insertConfig(parsed)
+                        count++
+                    }
+                }
+                simulator.log(
+                    if (count > 0) "Imported $count profiles from subscription"
+                    else "No valid profiles found in subscription"
+                )
+            } catch (e: Exception) {
+                simulator.log("Subscription error: ${e.message ?: e.javaClass.simpleName}")
             }
-            simulator.log("Fetched 5 profiles successfully")
         }
+    }
+
+    private fun fetchUrl(url: String): String {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.connectTimeout = 15000
+        connection.readTimeout = 15000
+        connection.setRequestProperty("User-Agent", "CFVPN/1.0")
+        return connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
+
+    private fun decodeBase64IfNeeded(body: String): String {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty()) return trimmed
+        val decoded = try {
+            android.util.Base64.decode(trimmed, android.util.Base64.DEFAULT)
+        } catch (e: Exception) {
+            return trimmed
+        }
+        val text = String(decoded, Charsets.UTF_8)
+        return if (text.contains("://")) text else trimmed
     }
 
     fun selectConfig(config: VpnConfig) {

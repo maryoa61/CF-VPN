@@ -98,7 +98,12 @@ class XrayVpnService : VpnService() {
     // ── وضعیت داخلی ──
     private var tunInterface: ParcelFileDescriptor? = null
     private var tunnelThread: Thread? = null
+    private var xrayThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
+
+    // توقف درخواست‌شده در حین اتصال (مثلاً Cancel هنگام CONNECTING) را ممکن می‌کند.
+    @Volatile
+    private var isStopping = false
     private lateinit var xrayConfigFile: File
     private lateinit var tunnelConfigFile: File
 
@@ -113,7 +118,8 @@ class XrayVpnService : VpnService() {
         when (intent?.action) {
             ACTION_STOP -> {
                 Log.i(TAG, "STOP action received.")
-                stopVpn()
+                // توقف روی ترد پس‌زمینه تا join تردها (تا ۲ ثانیه) باعث ANR نشود
+                Thread({ stopVpn() }, "vpn-stop-thread").start()
                 return START_NOT_STICKY
             }
             ACTION_START -> {
@@ -162,11 +168,11 @@ class XrayVpnService : VpnService() {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     private fun startVpn(config: VpnConfig) {
-        if (isRunning.get()) {
-            Log.w(TAG, "Service already running; duplicate request ignored.")
+        if (!isRunning.compareAndSet(false, true)) {
+            Log.w(TAG, "Service already starting/running; duplicate request ignored.")
             return
         }
-
+        isStopping = false
         currentConfig = config
 
         try {
@@ -176,6 +182,10 @@ class XrayVpnService : VpnService() {
             // این عملیات روی ترد پس‌زمینه است؛ چون تونل هنوز ساخته نشده،
             // سوکت‌های بررسی از مسیر اینترنت فیزیکی می‌روند (loop نمی‌شود).
             val edgePool = resolveEdgePool(config)
+            if (isStopping) {
+                cleanupAfterFailure()
+                return
+            }
 
             xrayConfigFile = File(cacheDir, "xray_config.json")
             val xrayConfigJson = XrayConfigGenerator.generate(config, filesDir, edgePool)
@@ -184,7 +194,14 @@ class XrayVpnService : VpnService() {
                 "(edgePool=${edgePool.size})")
 
             // ── مرحله ۲: استارت هسته Xray ──
+            // runV2Ray() تا زمان stopV2Ray() بلوک می‌شود، پس باید روی یک ترد
+            // اختصاصی اجرا شود؛ وگرنه مراحل ۳ تا ۵ (ساخت TUN، تونل و وضعیت
+            // CONNECTED) هیچ‌وقت اجرا نمی‌شوند.
             startXrayCore(xrayConfigFile)
+            if (isStopping) {
+                cleanupAfterFailure()
+                return
+            }
 
             // ── مرحله ۳: ساخت TUN interface ──
             val establishedFd = establishTunInterface()
@@ -201,6 +218,11 @@ class XrayVpnService : VpnService() {
                 mtu = TUN_MTU,
                 socksPort = XrayConfigGenerator.SOCKS_INBOUND_PORT
             )
+
+            if (isStopping) {
+                cleanupAfterFailure()
+                return
+            }
 
             // ── مرحله ۵: اجرای hev-socks5-tunnel (ترد بلاکینگ) ──
             tunnelThread = Thread({
@@ -292,6 +314,9 @@ class XrayVpnService : VpnService() {
      *
      * از reflection برای فراخوانی Libv2ray.runV2Ray() استفاده می‌شود
      * تا در صورت عدم وجود AAR، اپ کرش نکند (خطا به وضوح لاگ می‌شود).
+     *
+     * نکته: runV2Ray() تا زمان stopV2Ray() بلاک می‌شود. بنابراین روی یک ترد
+     * اختصاصی اجرا می‌شود تا مسیر راه‌اندازی TUN/tunnel مسدود نشود.
      */
     private fun startXrayCore(configFile: File) {
         if (!configFile.exists()) {
@@ -308,17 +333,28 @@ class XrayVpnService : VpnService() {
             )
         }
 
-        try {
-            Log.i(TAG, "Starting Xray-core with config: ${configFile.absolutePath}")
-            val errorMsg = runMethod.invoke(null, configFile.absolutePath) as? String
+        Log.i(TAG, "Starting Xray-core with config: ${configFile.absolutePath}")
+        xrayThread = Thread({
+            try {
+                val errorMsg = runMethod.invoke(null, configFile.absolutePath) as? String
 
-            if (!errorMsg.isNullOrEmpty()) {
-                throw IllegalStateException("Xray-core returned error: $errorMsg")
+                if (!errorMsg.isNullOrEmpty()) {
+                    Log.e(TAG, "Xray-core returned error: $errorMsg")
+                    stopVpn()
+                } else {
+                    Log.i(TAG, "Xray-core stopped.")
+                }
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                val cause = e.cause ?: e
+                Log.e(TAG, "Xray-core JNI call failed: ${cause.message}", cause)
+                stopVpn()
+            } catch (e: Exception) {
+                Log.e(TAG, "Xray-core unexpected error: ${e.message}", e)
+                stopVpn()
             }
-            Log.i(TAG, "Xray-core started successfully.")
-        } catch (e: java.lang.reflect.InvocationTargetException) {
-            val cause = e.cause ?: e
-            throw IllegalStateException("Xray-core JNI call failed: ${cause.message}", cause)
+        }, "xray-core-thread").apply {
+            isDaemon = true
+            start()
         }
     }
 
@@ -352,23 +388,25 @@ class XrayVpnService : VpnService() {
      *   ۳) Xray-core را متوقف کنیم
      *
      * اگر ترتیب رعایت نشود → native crash (SIGSEGV)
+     *
+     * این متد آیدم‌پوتنت است و حتی در حالی که اتصال هنوز در جریان است
+     * (CONNECTING) هم کار می‌کند؛ [startVpn] بعد از هر مرحله‌ی بلاکینگ،
+     * [isStopping] را چک می‌کند و در صورت نیاز خودش را پاک‌سازی می‌کند.
      */
     private fun stopVpn() {
-        if (!isRunning.getAndSet(false)) {
-            Log.d(TAG, "stopVpn called but service was already stopped.")
+        if (isStopping) {
+            Log.d(TAG, "stopVpn called but a stop is already in progress.")
             return
         }
+        isStopping = true
+        isRunning.set(false)
 
         Log.i(TAG, "Stopping VPN safely...")
         // اطلاع‌رسانی وضعیت به UI
-        VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED)
+        runCatching { VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED) }
 
         // مرحله ۱: توقف hev-socks5-tunnel
-        try {
-            HevSocks5Tunnel.stop()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping hev-socks5-tunnel: ${e.message}", e)
-        }
+        runCatching { HevSocks5Tunnel.stop() }
 
         // منتظر برگشت ترد تونل (حداکثر ۲ ثانیه)
         // نکته: اگر stopVpn از داخل خودِ ترد تونل صدا زده شده باشد،
@@ -385,26 +423,28 @@ class XrayVpnService : VpnService() {
         tunnelThread = null
 
         // مرحله ۲: بستن TUN interface
-        try {
-            tunInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing TUN ParcelFileDescriptor: ${e.message}", e)
-        } finally {
-            tunInterface = null
-        }
+        runCatching { tunInterface?.close() }
+        tunInterface = null
 
-        // مرحله ۳: توقف Xray-core
+        // مرحله ۳: توقف Xray-core → runV2Ray برمی‌گردد و ترد Xray خاتمه می‌یابد
+        runCatching { stopXrayCore() }
         try {
-            stopXrayCore()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping Xray-core: ${e.message}", e)
+            val current = Thread.currentThread()
+            if (xrayThread != null && xrayThread !== current) {
+                xrayThread?.join(2000)
+            }
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "xray thread join interrupted: ${e.message}")
+            Thread.currentThread().interrupt()
         }
+        xrayThread = null
 
         // پاک‌سازی فایل‌های موقت
         runCatching { if (::xrayConfigFile.isInitialized) xrayConfigFile.delete() }
         runCatching { if (::tunnelConfigFile.isInitialized) tunnelConfigFile.delete() }
 
         currentConfig = null
+        isStopping = false
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -413,10 +453,11 @@ class XrayVpnService : VpnService() {
     }
 
     /**
-     * پاک‌سازی در حالت خطا (قبل از isRunning=true).
+     * پاک‌سازی در حالت خطا (قبل از اتمام استارت یا هنگام Cancel حین اتصال).
      */
     private fun cleanupAfterFailure() {
-        runCatching { tunnelThread?.interrupt() }
+        isStopping = true
+        tunnelThread?.interrupt()
         tunnelThread = null
         runCatching { HevSocks5Tunnel.stop() }
         runCatching { tunInterface?.close() }
@@ -426,6 +467,7 @@ class XrayVpnService : VpnService() {
         // اطلاع‌رسانی وضعیت به UI
         runCatching { VpnConnectionManager.getInstance(this).setStatus(VpnStatus.DISCONNECTED) }
         currentConfig = null
+        isStopping = false
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
