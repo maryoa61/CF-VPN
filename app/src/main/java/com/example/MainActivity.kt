@@ -63,6 +63,7 @@ import com.example.vpn.VpnStatus
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
